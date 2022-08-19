@@ -36,40 +36,6 @@ python cli_helper.py
 
 However, if you want to customize even more your training, you can use the provided `train_{rave, prior}.py` and `export_{rave, prior}.py` scripts manually.
 
-### train_rave.py
-
-settings: small = shorter warmup/max_steps, smaller capacity. but notice the default capacity is large while the default steps is small…?
-
-- DATA_SIZE: number of channels in PQMF filter
-- CAPACITY: *not* a latent variable capacity in bits, but a rough ‘model capacity’ which just scales hidden layer sizes
-- LATENT_SIZE: number of latent dimensions before pruning
-- BIAS: passed directly to conv layers apparently, no idea why you would need this or ever set it to False
-- NO_LATENCY: enables causal convolutions, also a lower quality PQMF (?)
-- RATIOS: stride/upsample factor between blocks in the encoder and generator. also determines depth of encoder/generator
-- MIN_KL, MAX_KL: low and high values for the cyclic beta-VAE objective
-- CROPPED_LATENT_SIZE — this is here for inference I guess? appears set to 0 for training
-- FEATURE_MATCH: whether to include the discriminator feature-matching loss as part of loss_gen
-- LOUD_STRIDE: does something to the architecture of the generator (specifically, the ‘loudness’ branch)
-    - the loudness branch is much less of a ‘branch’ than the noise branch, more of an elaborate activation function
-- USE_NOISE: enables the noise branch of the generator
-- NOISE_RATIOS: downsampling ratios / network depth for the noise branch of the generator
-    - the noise branch again downsamples the already-upsampled latents to get ‘control-rate’ noise coefficients
-- NOISE_BANDS: number of noise bands *per* PQMF band in the generator ?
-- D_CAPACITY: like CAPACITY but for the discriminator
-- D_MULTIPLIER: interacts with D_CAPACITY and D_N_LAYERS to set the layer widths, conv groups, and strides in discriminator
-- D_N_LAYERS: discriminator depth
-- WARMUP: number of VAE-only iterations
-- MODE: type of GAN loss
-- CKPT: checkpoint to resume training from
-- PREPROCESSED: path to store preprocessed dataset, or to already preprocessed data
-- WAV: path to raw dataset
-- SR: audio sample rate
-- N_SIGNAL: batch length in audio samples
-- MAX_STEPS: end training after this many iterations
-- VAL_EVERY: run validation every so many iterations
-- BATCH: batch size
-- NAME: descriptive name for run
-
 ## Reconstructing audio
 
 Once trained, you can reconstruct an entire folder containing wav files using
@@ -81,14 +47,6 @@ python reconstruct.py --ckpt /path/to/checkpoint --wav-folder /path/to/wav/folde
 You can also export RAVE to a `torchscript` file using `export_rave.py` and use the `encode` and `decode` methods on tensors.
 
 ## Realtime usage
-
-**UPDATE**
-
-If you want to use the realtime mode, you should update your dependencies !
-
-```bash
-pip install -r requirements.txt
-```
 
 RAVE and the prior model can be used in realtime on live audio streams, allowing creative interactions with both models.
 
@@ -105,6 +63,14 @@ An audio example of the prior sampling patch is available in the `docs/` folder.
 You can also use RAVE as a VST audio plugin using the RAVE vst !
 
 ![plugin_screenshot](https://github.com/acids-ircam/rave_vst/blob/main/assets/rave_screenshot_audio_panel.png?raw=true)
+
+### rave-supercollider
+
+https://github.com/victor-shepardson/rave-supercollider
+
+### Qosmo Neutone
+
+https://neutone.space/
 
 ## Discussion
 

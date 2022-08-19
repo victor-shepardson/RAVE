@@ -21,45 +21,77 @@ if __name__ == "__main__":
     class args(Config):
         groups = ["small", "large"]
 
+        # number of channels in PQMF filter
         DATA_SIZE = 16
+        # *not* a latent variable capacity in bits, but a rough ‘model capacity’ which scales hidden layer sizes
         CAPACITY = setting(default=64, small=32, large=64)
+        # number of latent dimensions before pruning
         LATENT_SIZE = 128
+        # passed directly to conv layers apparently, no idea why you would need this or ever set it to False
         BIAS = True
+        # enables causal convolutions, also lowers quality of PQMF, which reduces latency of the inverse filter (?)
         NO_LATENCY = False
+        # stride/upsample factor between blocks in the encoder and generator. also determines depth of encoder/generator
         RATIOS = setting(
             default=[4, 4, 4, 2],
             small=[4, 4, 4, 2],
             large=[4, 4, 2, 2, 2],
         )
-
+        #low and high values for the cyclic beta-VAE objective
         MIN_KL = 1e-1
         MAX_KL = 1e-1
+        # this is here for inference I guess? set to 0 for training?
         CROPPED_LATENT_SIZE = 0
+        # whether to include the discriminator feature-matching loss as part of loss_gen
         FEATURE_MATCH = True
-
+        # architectural parameter for the generator (specifically, the ‘loudness’ branch)
         LOUD_STRIDE = 1
-
+        # enables the noise branch of the generator
         USE_NOISE = True
+        # downsampling ratios / network depth for the noise branch of the generator
         NOISE_RATIOS = [4, 4, 4]
+        # number of noise bands *per* PQMF band in the generator (?)
         NOISE_BANDS = 5
 
+        # CAPACITY but for the discriminator
         D_CAPACITY = 16
+        # interacts with D_CAPACITY and D_N_LAYERS to set the layer widths, conv groups, and strides in discriminator
         D_MULTIPLIER = 4
+        # discriminator depth
         D_N_LAYERS = 4
 
+        # number of VAE-only iterations
         WARMUP = setting(default=1000000, small=1000000, large=3000000)
+        # type of GAN loss
         MODE = "hinge"
+
+        # checkpoint to resume training from
         CKPT = None
-
+        # path to store preprocessed dataset, or to already preprocessed data
         PREPROCESSED = None
+        # path to raw dataset
         WAV = None
+        # audio sample rate
         SR = 48000
-        N_SIGNAL = 65536
+        # end training after this many iterations
         MAX_STEPS = setting(default=3000000, small=3000000, large=6000000)
+        # run validation every so many iterations
         VAL_EVERY = 10000
-
+        
+        # batch length in audio samples
+        N_SIGNAL = 65536
+        # batch size
         BATCH = 8
+        # generator+encoder learning rate
+        GEN_LR = 1e-4
+        # discrimiantor learning rate
+        DIS_LR = 1e-4
+        # generator+encoder beta parameters for Adam optimizer
+        GEN_ADAM_BETAS = [0.5, 0.9]
+        #  discriminator beta parameters for Adam optimizer
+        DIS_ADAM_BETAS = [0.5, 0.9]
 
+        # descriptive name for run
         NAME = None
 
     args.parse_args()
@@ -86,6 +118,10 @@ if __name__ == "__main__":
         max_kl=args.MAX_KL,
         cropped_latent_size=args.CROPPED_LATENT_SIZE,
         feature_match=args.FEATURE_MATCH,
+        gen_lr=args.GEN_LR,
+        dis_lr=args.DIS_LR,
+        gen_adam_betas=args.GEN_ADAM_BETAS,
+        dis_adam_betas=args.DIS_ADAM_BETAS
     )
 
     x = torch.zeros(args.BATCH, 2**14)
@@ -127,11 +163,17 @@ if __name__ == "__main__":
     val = DataLoader(val, args.BATCH, False, num_workers=num_workers)
 
     # CHECKPOINT CALLBACKS
-    validation_checkpoint = pl.callbacks.ModelCheckpoint(
-        monitor="validation",
-        filename="best",
-    )
-    last_checkpoint = pl.callbacks.ModelCheckpoint(filename="last")
+    # validation_checkpoint = pl.callbacks.ModelCheckpoint(
+    #     monitor="valid_distance",
+    #     filename="best",
+    # )
+    regular_checkpoint = pl.callbacks.ModelCheckpoint(
+        every_n_epochs=10,
+        filename="epoch-{epoch}"
+        )
+
+    # fix torch device order to be same as nvidia-smi order
+    os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
 
     CUDA = gpu.getAvailable(maxMemory=.05)
     VISIBLE_DEVICES = environ.get("CUDA_VISIBLE_DEVICES", "")
@@ -160,7 +202,8 @@ if __name__ == "__main__":
         logger=pl.loggers.TensorBoardLogger(path.join("runs", args.NAME),
                                             name="rave"),
         gpus=use_gpu,
-        callbacks=[validation_checkpoint, last_checkpoint],
+        callbacks=[regular_checkpoint],
+        # callbacks=[validation_checkpoint, last_checkpoint],
         max_epochs=100000,
         max_steps=args.MAX_STEPS,
         **val_check,

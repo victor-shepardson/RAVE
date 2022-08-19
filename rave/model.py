@@ -424,7 +424,12 @@ class RAVE(pl.LightningModule):
                  max_kl=5e-1,
                  cropped_latent_size=0,
                  feature_match=True,
-                 sr=24000):
+                 sr=24000,
+                 gen_lr=1e-4,
+                 dis_lr=1e-4,
+                 gen_adam_betas=(0.5,0.9),
+                 dis_adam_betas=(0.5,0.9),
+                ):
         super().__init__()
         self.save_hyperparameters()
 
@@ -494,8 +499,10 @@ class RAVE(pl.LightningModule):
         gen_p += list(self.decoder.parameters())
         dis_p = list(self.discriminator.parameters())
 
-        gen_opt = torch.optim.Adam(gen_p, 1e-4, (.5, .9))
-        dis_opt = torch.optim.Adam(dis_p, 1e-4, (.5, .9))
+        gen_opt = torch.optim.Adam(
+            gen_p, self.hparams['gen_lr'], self.hparams['gen_adam_betas'])
+        dis_opt = torch.optim.Adam(
+            dis_p, self.hparams['dis_lr'], self.hparams['dis_adam_betas'])
 
         return gen_opt, dis_opt
 
@@ -583,6 +590,9 @@ class RAVE(pl.LightningModule):
         p.tick("mb distance")
 
         if self.pqmf is not None:  # FULL BAND RECOMPOSITION
+            # why run inverse pqmf on x instead of
+            # saving original audio?
+            # some trimming edge case?
             x = self.pqmf.inverse(x)
             y = self.pqmf.inverse(y)
             distance = distance + self.distance(x, y)
@@ -639,7 +649,9 @@ class RAVE(pl.LightningModule):
             min_beta=self.min_kl,
             max_beta=self.max_kl,
         )
-        loss_gen = distance + loss_adv + beta * kl
+        loss_kld = beta * kl
+
+        loss_gen = distance + loss_adv + loss_kld
         if self.feature_match:
             loss_gen = loss_gen + feature_matching_distance
         p.tick("gen loss compose")
@@ -656,15 +668,29 @@ class RAVE(pl.LightningModule):
         p.tick("optimization")
 
         # LOGGING
-        self.log("loss_dis", loss_dis)
-        self.log("loss_gen", loss_gen)
-        self.log("loud_dist", loud_dist)
-        self.log("regularization", kl)
+        # total discriminator loss
+        self.log("loss_discriminator", loss_dis)
+        # total generator loss
+        self.log("loss_generator", loss_gen)
+
+        # KLD loss (KLD in nats per z * beta)
+        self.log("loss_kld", loss_kld)
+        # adversarial loss
+        self.log("loss_adversarial", loss_adv)
+        # spectral + loudness distance loss
+        self.log("loss_distance", distance)
+        # loudness distance loss
+        self.log("loss_loudness", loud_dist)
+        # feature-matching loss
+        self.log("loss_feature_matching", feature_matching_distance)
+
+        # KLD in bits per second
+        self.log("kld_bps", self.npz_to_bps(kl))
+        # beta-VAE parameter
+        self.log("beta", beta)
+
         self.log("pred_true", pred_true.mean())
         self.log("pred_fake", pred_fake.mean())
-        self.log("distance", distance)
-        self.log("beta", beta)
-        self.log("feature_matching", feature_matching_distance)
         p.tick("log")
 
         # print(p)
@@ -690,7 +716,7 @@ class RAVE(pl.LightningModule):
             x = self.pqmf(x)
 
         mean, scale = self.encoder(x)
-        z, _ = self.reparametrize(mean, scale)
+        z, kl = self.reparametrize(mean, scale)
         y = self.decoder(z, add_noise=self.warmed_up)
 
         if self.pqmf is not None:
@@ -700,9 +726,20 @@ class RAVE(pl.LightningModule):
         distance = self.distance(x, y)
 
         if self.trainer is not None:
-            self.log("validation", distance)
+            # full-band distance only,
+            # in contrast to training distance
+            self.log("valid_distance", distance)
+            # KLD in bits per second
+            self.log("valid_kld_bps", self.npz_to_bps(kl))
 
         return torch.cat([x, y], -1), mean
+
+    def npz_to_bps(self, npz):
+        """convert nats per z frame to bits per second"""
+        return (npz * self.hparams['sr'] 
+            / np.prod(self.hparams['ratios']) 
+            / self.hparams['data_size'] 
+            * np.log2(np.e))
 
     def validation_epoch_end(self, out):
         audio, z = list(zip(*out))

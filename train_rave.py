@@ -168,7 +168,7 @@ if __name__ == "__main__":
     #     filename="best",
     # )
     regular_checkpoint = pl.callbacks.ModelCheckpoint(
-        every_n_epochs=10,
+        # every_n_epochs=10,
         filename="epoch-{epoch}"
         )
 

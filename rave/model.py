@@ -725,14 +725,7 @@ class RAVE(pl.LightningModule):
 
         distance = self.distance(x, y)
 
-        if self.trainer is not None:
-            # full-band distance only,
-            # in contrast to training distance
-            self.log("valid_distance", distance)
-            # KLD in bits per second
-            self.log("valid_kld_bps", self.npz_to_bps(kl))
-
-        return torch.cat([x, y], -1), mean
+        return torch.cat([x, y], -1), mean, distance, kl
 
     def npz_to_bps(self, npz):
         """convert nats per z frame to bits per second"""
@@ -742,10 +735,17 @@ class RAVE(pl.LightningModule):
             * np.log2(np.e))
 
     def validation_epoch_end(self, out):
-        audio, z = list(zip(*out))
+        audio, z, distance, kl = list(zip(*out))
 
         if self.saved_step > self.warmup:
             self.warmed_up = True
+
+        if self.trainer is not None:
+            # full-band distance only,
+            # in contrast to training distance
+            self.log("valid_distance", sum(distance)/len(distance))
+            # KLD in bits per second
+            self.log("valid_kld_bps", self.npz_to_bps(sum(kl)/len(kl)))
 
         # LATENT SPACE ANALYSIS
         if not self.warmed_up:

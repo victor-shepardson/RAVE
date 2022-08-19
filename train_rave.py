@@ -168,8 +168,7 @@ if __name__ == "__main__":
     #     filename="best",
     # )
     regular_checkpoint = pl.callbacks.ModelCheckpoint(
-        # every_n_epochs=10,
-        filename="epoch-{epoch}"
+        filename="{epoch}"
         )
 
     # fix torch device order to be same as nvidia-smi order
@@ -199,8 +198,8 @@ if __name__ == "__main__":
         val_check["check_val_every_n_epoch"] = nepoch
 
     trainer = pl.Trainer(
-        logger=pl.loggers.TensorBoardLogger(path.join("runs", args.NAME),
-                                            name="rave"),
+        logger=pl.loggers.TensorBoardLogger(
+            path.join("runs", args.NAME), name="rave"),
         gpus=use_gpu,
         callbacks=[regular_checkpoint],
         # callbacks=[validation_checkpoint, last_checkpoint],
@@ -209,8 +208,9 @@ if __name__ == "__main__":
         **val_check,
     )
 
-    run = search_for_run(args.CKPT, mode="last")
-    if run is None: run = search_for_run(args.CKPT, mode="best")
+    run = search_for_run(args.CKPT, mode="epoch")
+    # run = search_for_run(args.CKPT, mode="last")
+    # if run is None: run = search_for_run(args.CKPT, mode="best")
     if run is not None:
         step = torch.load(run, map_location='cpu')["global_step"]
         trainer.fit_loop.epoch_loop._batches_that_stepped = step

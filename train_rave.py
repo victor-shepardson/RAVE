@@ -27,7 +27,11 @@ if __name__ == "__main__":
         CAPACITY = setting(default=64, small=32, large=64)
         # number of latent dimensions before pruning
         LATENT_SIZE = 128
-        # passed directly to conv layers apparently, no idea why you would need this or ever set it to False
+        # passed directly to conv layers apparently
+        # guessing this might be set to false if there are normalization layers
+        # that make the bias redundant,
+        # not sure why you would set this though since there is no option to
+        # change the norm layers
         BIAS = True
         # enables causal convolutions, also lowers quality of PQMF, which reduces latency of the inverse filter (?)
         NO_LATENCY = False
@@ -90,6 +94,9 @@ if __name__ == "__main__":
         GEN_ADAM_BETAS = [0.5, 0.9]
         #  discriminator beta parameters for Adam optimizer
         DIS_ADAM_BETAS = [0.5, 0.9]
+        # L2 norm to clip gradient
+        # (separately for encoder, generator, discriminator)
+        GRAD_CLIP = None
 
         # descriptive name for run
         NAME = None
@@ -121,7 +128,8 @@ if __name__ == "__main__":
         gen_lr=args.GEN_LR,
         dis_lr=args.DIS_LR,
         gen_adam_betas=args.GEN_ADAM_BETAS,
-        dis_adam_betas=args.DIS_ADAM_BETAS
+        dis_adam_betas=args.DIS_ADAM_BETAS,
+        grad_clip=args.GRAD_CLIP,
     )
 
     x = torch.zeros(args.BATCH, 2**14)

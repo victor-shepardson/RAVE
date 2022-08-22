@@ -14,11 +14,21 @@ logging.info("exporting model")
 
 class args(Config):
     RUN = None
+    # audio sample rate -- the exported model will convert to/from
+    # the RAVE model sample rate
     SR = None
+    # should be true for realtime?
     CACHED = False
+    # this is the proportion of variance to preserve when choosing num. latents
+    # appears the number of dimensions is rounded up to the nearest power of 2. 
+    # ignored if the checkpoint loaded has already had the latent space cropped
     FIDELITY = .95
+    # included in output filename
     NAME = "vae"
+    # if True, the pseudo-stereo effect is baked into the decode method
     STEREO = False
+    # if True, the latent is sampled at zero temperature
+    # and the noise branch of the decoder is turned off (!)
     DETERMINISTIC = False
 
 

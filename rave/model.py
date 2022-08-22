@@ -301,20 +301,20 @@ class Encoder(nn.Module):
                  bias=False):
         super().__init__()
         net = [
-            cc.Conv1d(data_size,
+            wn(cc.Conv1d(data_size,
                       capacity,
                       7,
                       padding=cc.get_padding(7, mode=padding_mode),
-                      bias=bias)
+                      bias=bias))
         ]
 
         for i, r in enumerate(ratios):
             in_dim = 2**i * capacity
             out_dim = 2**(i + 1) * capacity
 
-            net.append(nn.BatchNorm1d(in_dim))
+            # net.append(nn.BatchNorm1d(in_dim))
             net.append(nn.LeakyReLU(.2))
-            net.append(
+            net.append(wn(
                 cc.Conv1d(
                     in_dim,
                     out_dim,
@@ -322,11 +322,12 @@ class Encoder(nn.Module):
                     padding=cc.get_padding(2 * r + 1, r, mode=padding_mode),
                     stride=r,
                     bias=bias,
-                    cumulative_delay=net[-3].cumulative_delay,
-                ))
+                    # cumulative_delay=net[-3].cumulative_delay,
+                    cumulative_delay=net[-2].cumulative_delay,
+                )))
 
         net.append(nn.LeakyReLU(.2))
-        net.append(
+        net.append(wn(
             cc.Conv1d(
                 out_dim,
                 2 * latent_size,
@@ -335,7 +336,7 @@ class Encoder(nn.Module):
                 groups=2,
                 bias=bias,
                 cumulative_delay=net[-2].cumulative_delay,
-            ))
+            )))
 
         self.net = cc.CachedSequential(*net)
         self.cumulative_delay = self.net.cumulative_delay
@@ -508,6 +509,7 @@ class RAVE(pl.LightningModule):
         return gen_opt, dis_opt
 
     def lin_distance(self, x, y):
+        # is this normalization a problem when there is silence?
         return torch.norm(x - y) / torch.norm(x)
 
     def log_distance(self, x, y):

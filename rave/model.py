@@ -415,6 +415,7 @@ class RAVE(pl.LightningModule):
                  use_noise,
                  noise_ratios,
                  noise_bands,
+                 early_noise,
                  d_capacity,
                  d_multiplier,
                  d_n_layers,
@@ -585,7 +586,7 @@ class RAVE(pl.LightningModule):
             kl = kl.detach()
 
         # DECODE LATENT
-        y = self.decoder(z, add_noise=self.warmed_up)
+        y = self.decoder(z, add_noise=self.warmed_up or self.hparams['early_noise'])
         p.tick("decode")
 
         # DISTANCE BETWEEN INPUT AND OUTPUT
@@ -618,7 +619,9 @@ class RAVE(pl.LightningModule):
             pred_true = 0
             pred_fake = 0
 
+            # loop over parallel discriminators at 3 scales 1, 1/2, 1/4
             for scale_true, scale_fake in zip(feature_true, feature_fake):
+                # sum over feature maps within each parallel discriminator
                 feature_matching_distance = feature_matching_distance + 10 * sum(
                     map(
                         lambda x, y: abs(x - y).mean(),
@@ -626,6 +629,7 @@ class RAVE(pl.LightningModule):
                         scale_fake,
                     )) / len(scale_true)
 
+                # just the final feature map in each stack
                 _dis, _adv = self.adversarial_combine(
                     scale_true[-1],
                     scale_fake[-1],
@@ -735,7 +739,7 @@ class RAVE(pl.LightningModule):
 
         mean, scale = self.encoder(x)
         z, kl = self.reparametrize(mean, scale)
-        y = self.decoder(z, add_noise=self.warmed_up)
+        y = self.decoder(z, add_noise=self.warmed_up or self.hparams['early_noise'])
 
         if self.pqmf is not None:
             x = self.pqmf.inverse(x)

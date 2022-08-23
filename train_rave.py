@@ -56,6 +56,9 @@ if __name__ == "__main__":
         NOISE_RATIOS = [4, 4, 4]
         # number of noise bands *per* PQMF band in the generator (?)
         NOISE_BANDS = 5
+        # whether to include noise branch of generator
+        # in VAE training
+        EARLY_NOISE = False
 
         # CAPACITY but for the discriminator
         D_CAPACITY = 16
@@ -114,6 +117,7 @@ if __name__ == "__main__":
         use_noise=args.USE_NOISE,
         noise_ratios=args.NOISE_RATIOS,
         noise_bands=args.NOISE_BANDS,
+        early_noise=args.EARLY_NOISE,
         d_capacity=args.D_CAPACITY,
         d_multiplier=args.D_MULTIPLIER,
         d_n_layers=args.D_N_LAYERS,

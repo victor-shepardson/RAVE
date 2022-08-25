@@ -66,6 +66,19 @@ if __name__ == "__main__":
         D_MULTIPLIER = 4
         # discriminator depth
         D_N_LAYERS = 4
+        # changes the discriminator to operate on (real, fake) vs (fake, fake) 
+        # pairs, which has the effect of making it a conditional GAN:
+        # it learns whether y is a realistic reconstruction from z,
+        # not just whether it is realistic audio.
+        # using pairs in the audio domain is convenient since it requires almost
+        # no change to the architecture.
+        # (not sure how this interacts with FEATURE_MATCH)
+        PAIR_DISCRIMINATOR = False
+        # changes the distance loss to use the generalized energy distance
+        # from http://arxiv.org/abs/2008.01160
+        # this should correspond to a more expressive likelihood
+        # (and possibly be more compatible with the adversarial loss)
+        GED = False
 
         # number of VAE-only iterations
         WARMUP = setting(default=1000000, small=1000000, large=3000000)
@@ -121,6 +134,8 @@ if __name__ == "__main__":
         d_capacity=args.D_CAPACITY,
         d_multiplier=args.D_MULTIPLIER,
         d_n_layers=args.D_N_LAYERS,
+        pair_discriminator=args.PAIR_DISCRIMINATOR,
+        ged=args.GED,
         warmup=args.WARMUP,
         mode=args.MODE,
         no_latency=args.NO_LATENCY,

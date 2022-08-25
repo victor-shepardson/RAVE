@@ -341,8 +341,10 @@ class Encoder(nn.Module):
         self.net = cc.CachedSequential(*net)
         self.cumulative_delay = self.net.cumulative_delay
 
-    def forward(self, x):
+    def forward(self, x, double=False):
         z = self.net(x)
+        if double:
+            z = z.repeat(2, *(1,)*(z.ndim-1))
         return torch.split(z, z.shape[1] // 2, 1)
 
 
@@ -419,6 +421,8 @@ class RAVE(pl.LightningModule):
                  d_capacity,
                  d_multiplier,
                  d_n_layers,
+                 pair_discriminator,
+                 ged,
                  warmup,
                  mode,
                  no_latency=False,
@@ -468,7 +472,7 @@ class RAVE(pl.LightningModule):
 
         self.discriminator = StackDiscriminators(
             3,
-            in_size=1,
+            in_size=2 if self.hparams['pair_discriminator'] else 1,
             capacity=d_capacity,
             multiplier=d_multiplier,
             n_layers=d_n_layers,
@@ -510,19 +514,47 @@ class RAVE(pl.LightningModule):
         return gen_opt, dis_opt
 
     def lin_distance(self, x, y):
-        # is this normalization a problem when there is silence?
-        return torch.norm(x - y) / torch.norm(x)
+        # is the norm across batch items (and bands...) a problem here?
+        # return torch.norm(x - y)
+        return torch.linalg.vector_norm(x - y, dim=(-1,-2,-3)).mean()
+
+    def norm_lin_distance(self, x, y):
+        # return torch.norm(x - y) / torch.norm(x)
+        norm = lambda z: torch.linalg.vector_norm(z, dim=(-1,-2,-3))
+        return (norm(x - y) / norm(x)).mean()
 
     def log_distance(self, x, y):
         return abs(torch.log(x + 1e-7) - torch.log(y + 1e-7)).mean()
 
-    def distance(self, x, y):
-        scales = [2048, 1024, 512, 256, 128]
-        x = multiscale_stft(x, scales, .75)
-        y = multiscale_stft(y, scales, .75)
+    def distance(self, x, y, y2=None):
+        """
+        multiscale log + lin spectrogram distance. if y2 is supplied,
+        compute the GED: d(x,y) + d(x,y2) - d(y,y2).
 
-        lin = sum(list(map(self.lin_distance, x, y)))
-        log = sum(list(map(self.log_distance, x, y)))
+        in GED mode, linear distance will not be normalized by x,
+        since the distance needs to be symmetric.
+        """
+        scales = [2048, 1024, 512, 256, 128]
+        parts = [x,y]
+        if y2 is not None:
+            parts.append(y2)
+        # batch through the stft
+        stfts = multiscale_stft(torch.cat(parts), scales, .75)
+        if y2 is None:
+            x, y = zip(*(s.chunk(2) for s in stfts))
+            lin = sum(list(map(self.lin_distance, x, y)))
+            log = sum(list(map(self.log_distance, x, y)))
+        else:
+            x, y, y2 = zip(*(s.chunk(3) for s in stfts))
+            # print([s.shape for s in x])
+            lin = (
+                sum(map(self.lin_distance, x, y))
+                + sum(map(self.lin_distance, x, y2))
+                - sum(map(self.lin_distance, y, y2)))
+            log = (
+                sum(map(self.log_distance, x, y))
+                + sum(map(self.log_distance, x, y2))
+                - sum(map(self.log_distance, y, y2)))
 
         return lin + log
 
@@ -574,23 +606,40 @@ class RAVE(pl.LightningModule):
             x = self.pqmf(x)
             p.tick("pqmf")
 
-        if self.warmed_up:  # EVAL ENCODER
-            self.encoder.eval()
+        # GED reconstruction and pair discriminator both require
+        # two z samples per input
+        use_pairs = self.hparams['pair_discriminator']
+        use_ged = self.hparams['ged']
+        double_z = use_ged or (use_pairs and self.warmed_up)
 
         # ENCODE INPUT
-        z, kl = self.reparametrize(*self.encoder(x))
-        p.tick("encode")
+        if self.warmed_up:  # EVAL + FREEZE ENCODER
+            self.encoder.eval()
+            with torch.no_grad():
+                z, kl = self.reparametrize(*self.encoder(
+                    x, double=double_z))
+        else:
+            z, kl = self.reparametrize(*self.encoder(
+                x, double=double_z))
 
-        if self.warmed_up:  # FREEZE ENCODER
-            z = z.detach()
-            kl = kl.detach()
+        # z, kl = self.reparametrize(*self.encoder(x))
+        # p.tick("encode")
+
+        # if self.warmed_up:  # FREEZE ENCODER
+        #     z = z.detach()
+        #     kl = kl.detach()
 
         # DECODE LATENT
         y = self.decoder(z, add_noise=self.warmed_up or self.hparams['early_noise'])
+
+        if double_z:
+            y, y2 = y.chunk(2)
+        else:
+            y2 = None
         p.tick("decode")
 
         # DISTANCE BETWEEN INPUT AND OUTPUT
-        distance = self.distance(x, y)
+        distance = self.distance(x, y, y2 if use_ged else None)
         p.tick("mb distance")
 
         if self.pqmf is not None:  # FULL BAND RECOMPOSITION
@@ -599,19 +648,32 @@ class RAVE(pl.LightningModule):
             # some trimming edge case?
             x = self.pqmf.inverse(x)
             y = self.pqmf.inverse(y)
-            distance = distance + self.distance(x, y)
+            if y2 is not None:
+                y2 = self.pqmf.inverse(y2)
+            distance = distance + self.distance(x, y, y2 if use_ged else None)
             p.tick("fb distance")
 
         loud_x = self.loudness(x)
         loud_y = self.loudness(y)
         loud_dist = (loud_x - loud_y).pow(2).mean()
+        if use_ged:
+            loud_y2 = self.loudness(y2)
+            loud_dist = (loud_dist 
+                + (loud_x - loud_y2).pow(2).mean() 
+                - (loud_y2 - loud_y).pow(2).mean())
         distance = distance + loud_dist
         p.tick("loudness distance")
 
         feature_matching_distance = 0.
         if self.warmed_up:  # DISCRIMINATION
-            feature_true = self.discriminator(x)
-            feature_fake = self.discriminator(y)
+            if use_pairs:
+                real = torch.cat((x, y), -2)
+                fake = torch.cat((y2, y), -2)
+            else:
+                real = x
+                fake = y
+            feature_true = self.discriminator(real)
+            feature_fake = self.discriminator(fake)
 
             loss_dis = 0
             loss_adv = 0
@@ -622,12 +684,13 @@ class RAVE(pl.LightningModule):
             # loop over parallel discriminators at 3 scales 1, 1/2, 1/4
             for scale_true, scale_fake in zip(feature_true, feature_fake):
                 # sum over feature maps within each parallel discriminator
-                feature_matching_distance = feature_matching_distance + 10 * sum(
-                    map(
-                        lambda x, y: abs(x - y).mean(),
-                        scale_true,
-                        scale_fake,
-                    )) / len(scale_true)
+                if self.feature_match:
+                    feature_matching_distance = feature_matching_distance + 10*sum(
+                        map(
+                            lambda x, y: abs(x - y).mean(),
+                            scale_true,
+                            scale_fake,
+                        )) / len(scale_true)
 
                 # just the final feature map in each stack
                 _dis, _adv = self.adversarial_combine(

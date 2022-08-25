@@ -27,6 +27,7 @@ def multiscale_stft(signal, scales, overlap):
     overlap: float
         overlap between windows ( 0 - 1 )
     """
+    bc = signal.shape[:2]
     signal = rearrange(signal, "b c t -> (b c) t")
     stfts = []
     for s in scales:
@@ -35,11 +36,13 @@ def multiscale_stft(signal, scales, overlap):
             s,
             int(s * (1 - overlap)),
             s,
-            torch.hann_window(s).to(signal),
+            # torch.hann_window(s).to(signal),
+            torch.hann_window(s, device=signal.device, dtype=signal.dtype),
             True,
             normalized=True,
             return_complex=True,
         ).abs()
+        S = S.reshape(*bc, *S.shape[-2:])
         stfts.append(S)
     return stfts
 

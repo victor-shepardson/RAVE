@@ -298,10 +298,13 @@ class Encoder(nn.Module):
                  latent_size,
                  ratios,
                  padding_mode,
+                 use_bn,
                  bias=False):
         super().__init__()
+        maybe_wn = (lambda x:x) if use_bn else wn
+
         net = [
-            wn(cc.Conv1d(data_size,
+            maybe_wn(cc.Conv1d(data_size,
                       capacity,
                       7,
                       padding=cc.get_padding(7, mode=padding_mode),
@@ -312,9 +315,10 @@ class Encoder(nn.Module):
             in_dim = 2**i * capacity
             out_dim = 2**(i + 1) * capacity
 
-            # net.append(nn.BatchNorm1d(in_dim))
+            if use_bn:
+                net.append(nn.BatchNorm1d(in_dim))
             net.append(nn.LeakyReLU(.2))
-            net.append(wn(
+            net.append(maybe_wn(
                 cc.Conv1d(
                     in_dim,
                     out_dim,
@@ -322,12 +326,11 @@ class Encoder(nn.Module):
                     padding=cc.get_padding(2 * r + 1, r, mode=padding_mode),
                     stride=r,
                     bias=bias,
-                    # cumulative_delay=net[-3].cumulative_delay,
-                    cumulative_delay=net[-2].cumulative_delay,
+                    cumulative_delay=net[-3 if use_bn else -2].cumulative_delay,
                 )))
 
         net.append(nn.LeakyReLU(.2))
-        net.append(wn(
+        net.append(maybe_wn(
             cc.Conv1d(
                 out_dim,
                 2 * latent_size,
@@ -413,6 +416,7 @@ class RAVE(pl.LightningModule):
                  latent_size,
                  ratios,
                  bias,
+                 encoder_batchnorm,
                  loud_stride,
                  use_noise,
                  noise_ratios,
@@ -455,6 +459,7 @@ class RAVE(pl.LightningModule):
             encoder_out_size,
             ratios,
             "causal" if no_latency else "centered",
+            encoder_batchnorm,
             bias,
         )
         self.decoder = Generator(

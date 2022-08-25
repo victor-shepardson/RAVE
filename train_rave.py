@@ -33,6 +33,8 @@ if __name__ == "__main__":
         # not sure why you would set this though since there is no option to
         # change the norm layers
         BIAS = True
+        # ...
+        ENCODER_BATCHORM = True
         # enables causal convolutions, also lowers quality of PQMF, which reduces latency of the inverse filter (?)
         NO_LATENCY = False
         # stride/upsample factor between blocks in the encoder and generator. also determines depth of encoder/generator
@@ -126,6 +128,7 @@ if __name__ == "__main__":
         latent_size=args.LATENT_SIZE,
         ratios=args.RATIOS,
         bias=args.BIAS,
+        encoder_batchnorm=args.ENCODER_BATCHORM,
         loud_stride=args.LOUD_STRIDE,
         use_noise=args.USE_NOISE,
         noise_ratios=args.NOISE_RATIOS,

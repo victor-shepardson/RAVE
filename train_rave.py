@@ -31,9 +31,11 @@ if __name__ == "__main__":
         # guessing this might be set to false if there are normalization layers
         # that make the bias redundant,
         # not sure why you would set this though since there is no option to
-        # change the norm layers
+        # change the norm layers (except in the encoder, below)
         BIAS = True
-        # ...
+        # if False, replace BatchNorm Layers in the encoder with weight norm as
+        # in all other parts of the network;
+        # this seems to fix the bad validation performance
         ENCODER_BATCHNORM = True
         # enables causal convolutions, also lowers quality of PQMF, which reduces latency of the inverse filter (?)
         NO_LATENCY = False

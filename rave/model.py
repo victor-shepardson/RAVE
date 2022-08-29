@@ -570,7 +570,18 @@ class RAVE(pl.LightningModule):
 
         z = torch.randn_like(mean) * std + mean
 
+        # this computes *twice* the KLD per z in nats
         kl = (mean * mean + var - logvar - 1).sum(1).mean()
+
+        # if self.hparams['sample_kld']:
+        #     u = torch.randn_like(mean)
+        #     z = u * std + mean # z*z = u*u*std*std + mean*mean + 2u*std*mean
+        #     kl = 0.5 * (z*z - u*u - std.log())
+        # else:
+        #     var = std * std
+        #     logvar = torch.log(var)
+        #     z = torch.randn_like(mean) * std + mean
+        #     kl = 0.5 * (mean * mean + var - logvar - 1).sum(1).mean()
 
         if self.cropped_latent_size:
             noise = torch.randn(

@@ -632,11 +632,9 @@ class RAVE(pl.LightningModule):
         if self.warmed_up:  # EVAL + FREEZE ENCODER
             self.encoder.eval()
             with torch.no_grad():
-                z, kl = self.reparametrize(*self.encoder(
-                    x, double=double_z))
+                z, kl = self.reparametrize(*self.encoder(x, double=double_z))
         else:
-            z, kl = self.reparametrize(*self.encoder(
-                x, double=double_z))
+            z, kl = self.reparametrize(*self.encoder(x, double=double_z))
 
         # z, kl = self.reparametrize(*self.encoder(x))
         # p.tick("encode")
@@ -700,6 +698,8 @@ class RAVE(pl.LightningModule):
             # loop over parallel discriminators at 3 scales 1, 1/2, 1/4
             for scale_true, scale_fake in zip(feature_true, feature_fake):
                 # sum over feature maps within each parallel discriminator
+                # NOTE: this appears to include the final output neuron as a
+                # feature map, seems like this would mess with the GAN objective?
                 if self.feature_match:
                     feature_matching_distance = feature_matching_distance + 10*sum(
                         map(

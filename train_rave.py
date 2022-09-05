@@ -48,6 +48,8 @@ if __name__ == "__main__":
         #low and high values for the cyclic beta-VAE objective
         MIN_KL = 1e-1
         MAX_KL = 1e-1
+        # use a different parameterization and compute the sample KLD instead of analytic
+        SAMPLE_KL = False
         # this is here for inference I guess? set to 0 for training?
         CROPPED_LATENT_SIZE = 0
         # whether to include the discriminator feature-matching loss as part of loss_gen
@@ -60,7 +62,7 @@ if __name__ == "__main__":
         NOISE_RATIOS = [4, 4, 4]
         # number of noise bands *per* PQMF band in the generator (?)
         NOISE_BANDS = 5
-        # whether to include noise branch of generator
+        # whether to include noise   branch of generator
         # in VAE training
         EARLY_NOISE = False
 
@@ -108,7 +110,7 @@ if __name__ == "__main__":
         BATCH = 8
         # generator+encoder learning rate
         GEN_LR = 1e-4
-        # discrimiantor learning rate
+        # discriminator learning rate
         DIS_LR = 1e-4
         # generator+encoder beta parameters for Adam optimizer
         GEN_ADAM_BETAS = [0.5, 0.9]
@@ -120,6 +122,8 @@ if __name__ == "__main__":
 
         # descriptive name for run
         NAME = None
+
+        LOGDIR = "runs"
 
     args.parse_args()
 
@@ -147,6 +151,7 @@ if __name__ == "__main__":
         sr=args.SR,
         min_kl=args.MIN_KL,
         max_kl=args.MAX_KL,
+        sample_kl=args.SAMPLE_KL,
         cropped_latent_size=args.CROPPED_LATENT_SIZE,
         feature_match=args.FEATURE_MATCH,
         gen_lr=args.GEN_LR,
@@ -200,8 +205,9 @@ if __name__ == "__main__":
     #     filename="best",
     # )
     regular_checkpoint = pl.callbacks.ModelCheckpoint(
-        filename="{epoch}"
+        filename="{epoch}", save_top_k=-1, every_n_epoch=30
         )
+    last_checkpoint = pl.callbacks.ModelCheckpoint(filename="last")
 
     # fix torch device order to be same as nvidia-smi order
     os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
@@ -231,9 +237,9 @@ if __name__ == "__main__":
 
     trainer = pl.Trainer(
         logger=pl.loggers.TensorBoardLogger(
-            path.join("runs", args.NAME), name="rave"),
+            path.join(args.LOGDIR, args.NAME), name="rave"),
         gpus=use_gpu,
-        callbacks=[regular_checkpoint],
+        callbacks=[regular_checkpoint, last_checkpoint],
         # callbacks=[validation_checkpoint, last_checkpoint],
         max_epochs=100000,
         max_steps=args.MAX_STEPS,

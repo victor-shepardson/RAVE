@@ -10,6 +10,7 @@ from sklearn.decomposition import PCA
 from einops import rearrange
 
 from time import time
+import itertools as it
 
 import cached_conv as cc
 
@@ -432,6 +433,7 @@ class RAVE(pl.LightningModule):
                  no_latency=False,
                  min_kl=1e-4,
                  max_kl=5e-1,
+                 sample_kl=False,
                  cropped_latent_size=0,
                  feature_match=True,
                  sr=24000,
@@ -535,9 +537,6 @@ class RAVE(pl.LightningModule):
         """
         multiscale log + lin spectrogram distance. if y2 is supplied,
         compute the GED: d(x,y) + d(x,y2) - d(y,y2).
-
-        in GED mode, linear distance will not be normalized by x,
-        since the distance needs to be symmetric.
         """
         scales = [2048, 1024, 512, 256, 128]
         parts = [x,y]
@@ -564,24 +563,18 @@ class RAVE(pl.LightningModule):
         return lin + log
 
     def reparametrize(self, mean, scale):
-        std = nn.functional.softplus(scale) + 1e-4
-        var = std * std
-        logvar = torch.log(var)
 
-        z = torch.randn_like(mean) * std + mean
-
-        # this computes *twice* the KLD per z in nats
-        kl = (mean * mean + var - logvar - 1).sum(1).mean()
-
-        # if self.hparams['sample_kld']:
-        #     u = torch.randn_like(mean)
-        #     z = u * std + mean # z*z = u*u*std*std + mean*mean + 2u*std*mean
-        #     kl = 0.5 * (z*z - u*u - std.log())
-        # else:
-        #     var = std * std
-        #     logvar = torch.log(var)
-        #     z = torch.randn_like(mean) * std + mean
-        #     kl = 0.5 * (mean * mean + var - logvar - 1).sum(1).mean()
+        if self.hparams['sample_kl']:
+            log_std = scale.clamp(-7, 7)
+            u = torch.randn_like(mean)
+            z = u * log_std.exp() + mean # z*z = u*u*std*std + mean*mean + 2u*std*mean
+            kl = 0.5 * (z*z - u*u - log_std).sum(1).mean()
+        else:
+            std = nn.functional.softplus(scale) + 1e-4
+            var = std * std
+            logvar = torch.log(var)
+            z = torch.randn_like(mean) * std + mean
+            kl = 0.5 * (mean * mean + var - logvar - 1).sum(1).mean()
 
         if self.cropped_latent_size:
             noise = torch.randn(
@@ -594,18 +587,16 @@ class RAVE(pl.LightningModule):
 
     def adversarial_combine(self, score_real, score_fake, mode="hinge"):
         if mode == "hinge":
-            loss_dis = torch.relu(1 - score_real) + torch.relu(1 + score_fake)
-            loss_dis = loss_dis.mean()
+            loss_dis = torch.relu(1 - score_real).mean() + torch.relu(1 + score_fake).mean()
             loss_gen = -score_fake.mean()
         elif mode == "square":
-            loss_dis = (score_real - 1).pow(2) + score_fake.pow(2)
-            loss_dis = loss_dis.mean()
+            loss_dis = (score_real - 1).pow(2).mean() + score_fake.pow(2).mean()
             loss_gen = (score_fake - 1).pow(2).mean()
         elif mode == "nonsaturating":
             score_real = torch.clamp(torch.sigmoid(score_real), 1e-7, 1 - 1e-7)
             score_fake = torch.clamp(torch.sigmoid(score_fake), 1e-7, 1 - 1e-7)
-            loss_dis = -(torch.log(score_real) +
-                         torch.log(1 - score_fake)).mean()
+            loss_dis = -(torch.log(score_real).mean() +
+                         torch.log(1 - score_fake).mean())
             loss_gen = -torch.log(score_fake).mean()
         else:
             raise NotImplementedError
@@ -667,65 +658,79 @@ class RAVE(pl.LightningModule):
             distance = distance + self.distance(x, y, y2 if use_ged else None)
             p.tick("fb distance")
 
-        loud_x = self.loudness(x)
-        loud_y = self.loudness(y)
-        loud_dist = (loud_x - loud_y).pow(2).mean()
         if use_ged:
-            loud_y2 = self.loudness(y2)
-            loud_dist = (loud_dist 
+            loud_x, loud_y, loud_y2 = self.loudness(torch.cat((x,y,y2))).chunk(3)
+            loud_dist = (
+                (loud_x - loud_y).pow(2).mean()
                 + (loud_x - loud_y2).pow(2).mean() 
                 - (loud_y2 - loud_y).pow(2).mean())
+        else:
+            loud_x, loud_y = self.loudness(torch.cat((x,y))).chunk(2)
+            loud_dist = (loud_x - loud_y).pow(2).mean()
+
         distance = distance + loud_dist
         p.tick("loudness distance")
 
         feature_matching_distance = 0.
         if self.warmed_up:  # DISCRIMINATION
-            if use_pairs:
+            if use_pairs and not use_ged:
                 real = torch.cat((x, y), -2)
                 fake = torch.cat((y2, y), -2)
-            else:
-                real = x
-                fake = y
-            feature_true = self.discriminator(real)
-            feature_fake = self.discriminator(fake)
+                to_disc = torch.cat((real, fake))
+            if use_pairs and use_ged:
+                real = torch.cat((x, y), -2)
+                fake = torch.cat((y2, y), -2)
+                fake2 = torch.cat((y, y2), -2)
+                to_disc = torch.cat((real, fake, fake2))
+            if not use_pairs and use_ged:
+                to_disc = torch.cat((x, y, y2))
+            if not use_pairs and not use_ged:
+                to_disc = torch.cat((x, y))
+            discs_features = self.discriminator(to_disc)
+
+            # all but final layer in each parallel discriminator
+            feature_maps = it.chain(d[:-1] for d in discs_features)
+            # final layers
+            scores = [d[-1] for d in discs_features]
 
             loss_dis = 0
             loss_adv = 0
-
             pred_true = 0
             pred_fake = 0
 
             # loop over parallel discriminators at 3 scales 1, 1/2, 1/4
-            for scale_true, scale_fake in zip(feature_true, feature_fake):
-                # sum over feature maps within each parallel discriminator
-                # NOTE: this appears to include the final output neuron as a
-                # feature map, seems like this would mess with the GAN objective?
-                if self.feature_match:
-                    feature_matching_distance = feature_matching_distance + 10*sum(
-                        map(
-                            lambda x, y: abs(x - y).mean(),
-                            scale_true,
-                            scale_fake,
-                        )) / len(scale_true)
-
-                # just the final feature map in each stack
-                _dis, _adv = self.adversarial_combine(
-                    scale_true[-1],
-                    scale_fake[-1],
-                    mode=self.mode,
-                )
-
-                pred_true = pred_true + scale_true[-1].mean()
-                pred_fake = pred_fake + scale_fake[-1].mean()
-
+            for s in scores:
+                if use_ged:
+                    real, fake = s.split((s.shape[0]//3, s.shape[0]*2//3))
+                else:
+                    real, fake = s.chunk(2)
+                _dis, _adv = self.adversarial_combine(real, fake, mode=self.mode)
                 loss_dis = loss_dis + _dis
                 loss_adv = loss_adv + _adv
+                pred_true = pred_true + real.mean()
+                pred_fake = pred_fake + fake.mean()
+
+            if self.feature_match:
+                if use_ged:
+                    def dist(fm):
+                        real, fake, fake2 = fm.chunk(3)
+                        return (
+                            (real-fake).abs().mean()
+                            + (real-fake2).abs().mean()
+                            - (fake-fake2).abs().mean()
+                        )
+                else:
+                    def dist(fm):
+                        real, fake = fm.chunk(2)
+                        return (real-fake).abs().mean()
+                feature_matching_distance = 10*sum(
+                    map(dist, feature_maps)) / len(feature_maps)
 
         else:
-            pred_true = torch.tensor(0.).to(x)
-            pred_fake = torch.tensor(0.).to(x)
-            loss_dis = torch.tensor(0.).to(x)
-            loss_adv = torch.tensor(0.).to(x)
+            pred_true = batch.new_zeros(1)
+            pred_fake = batch.new_zeros(1)
+            loss_dis = batch.new_zeros(1)
+            loss_adv = batch.new_zeros(1)
 
         # COMPOSE GEN LOSS
         beta = get_beta_kl_cyclic_annealed(

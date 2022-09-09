@@ -50,6 +50,9 @@ if __name__ == "__main__":
         MAX_KL = 1e-1
         # use a different parameterization and compute the sample KLD instead of analytic
         SAMPLE_KL = False
+        # use the kld term from http://arxiv.org/abs/1703.09194
+        # (SAMPLE_KL must be true)
+        PATH_DERIVATIVE = False
         # this is here for inference I guess? set to 0 for training?
         CROPPED_LATENT_SIZE = 0
         # whether to include the discriminator feature-matching loss as part of loss_gen
@@ -152,6 +155,7 @@ if __name__ == "__main__":
         min_kl=args.MIN_KL,
         max_kl=args.MAX_KL,
         sample_kl=args.SAMPLE_KL,
+        path_derivative=args.PATH_DERIVATIVE,
         cropped_latent_size=args.CROPPED_LATENT_SIZE,
         feature_match=args.FEATURE_MATCH,
         gen_lr=args.GEN_LR,
@@ -205,7 +209,7 @@ if __name__ == "__main__":
     #     filename="best",
     # )
     regular_checkpoint = pl.callbacks.ModelCheckpoint(
-        filename="{epoch}", save_top_k=-1, every_n_epoch=30
+        filename="{epoch}", save_top_k=-1, every_n_epochs=30
         )
     last_checkpoint = pl.callbacks.ModelCheckpoint(filename="last")
 
@@ -243,11 +247,12 @@ if __name__ == "__main__":
         # callbacks=[validation_checkpoint, last_checkpoint],
         max_epochs=100000,
         max_steps=args.MAX_STEPS,
+        num_sanity_val_steps=2,
         **val_check,
     )
 
-    run = search_for_run(args.CKPT, mode="epoch")
-    # run = search_for_run(args.CKPT, mode="last")
+    # run = search_for_run(args.CKPT, mode="epoch")
+    run = search_for_run(args.CKPT, mode="last")
     # if run is None: run = search_for_run(args.CKPT, mode="best")
     if run is not None:
         step = torch.load(run, map_location='cpu')["global_step"]

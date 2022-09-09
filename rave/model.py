@@ -434,6 +434,7 @@ class RAVE(pl.LightningModule):
                  min_kl=1e-4,
                  max_kl=5e-1,
                  sample_kl=False,
+                 path_derivative=False,
                  cropped_latent_size=0,
                  feature_match=True,
                  sr=24000,
@@ -568,7 +569,13 @@ class RAVE(pl.LightningModule):
             log_std = scale.clamp(-7, 7)
             u = torch.randn_like(mean)
             z = u * log_std.exp() + mean # z*z = u*u*std*std + mean*mean + 2u*std*mean
-            kl = 0.5 * (z*z - u*u - log_std).sum(1).mean()
+            if self.hparams['path_derivative']:
+                log_std = log_std.detach()
+                mean = mean.detach()
+                _u = (z - mean) / log_std.exp()
+                kl = (0.5*(z*z - _u*_u) - log_std).sum(1).mean()
+            else:
+                kl = (0.5*(z*z - u*u) - log_std).sum(1).mean()
         else:
             std = nn.functional.softplus(scale) + 1e-4
             var = std * std
@@ -689,7 +696,8 @@ class RAVE(pl.LightningModule):
             discs_features = self.discriminator(to_disc)
 
             # all but final layer in each parallel discriminator
-            feature_maps = it.chain(d[:-1] for d in discs_features)
+            # sum is doing list concatenation here
+            feature_maps = sum([d[:-1] for d in discs_features], start=[])
             # final layers
             scores = [d[-1] for d in discs_features]
 
@@ -748,14 +756,34 @@ class RAVE(pl.LightningModule):
         p.tick("gen loss compose")
 
         # OPTIMIZATION
-        if self.global_step % 2 and self.warmed_up:
+        is_disc_step = self.global_step % 2 and self.warmed_up
+        grad_clip = self.hparams['grad_clip']
+
+        if is_disc_step:
             dis_opt.zero_grad()
             loss_dis.backward()
+
+            if grad_clip is not None:
+                dis_grad = nn.utils.clip_grad_norm_(
+                    self.discriminator.parameters(), grad_clip)
+                self.log('grad_norm_discriminator', dis_grad)
+
             dis_opt.step()
         else:
             gen_opt.zero_grad()
             loss_gen.backward()
+
+            if grad_clip is not None:
+                if not self.warmed_up:
+                    enc_grad = nn.utils.clip_grad_norm_(
+                        self.encoder.parameters(), grad_clip)
+                    self.log('grad_norm_encoder', enc_grad)
+                dec_grad = nn.utils.clip_grad_norm_(
+                    self.decoder.parameters(), grad_clip)
+                self.log('grad_norm_generator', dec_grad)
+
             gen_opt.step()
+               
         p.tick("optimization")
 
         # LOGGING
@@ -784,18 +812,7 @@ class RAVE(pl.LightningModule):
             # feature-matching loss
             self.log("loss_feature_matching", feature_matching_distance)
 
-        grad_clip = self.hparams['grad_clip']
-        if grad_clip is not None:
-            enc_grad = nn.utils.clip_grad_norm_(
-                self.encoder.parameters(), grad_clip)
-            self.log('grad_norm_encoder', enc_grad)
-            dec_grad = nn.utils.clip_grad_norm_(
-                self.decoder.parameters(), grad_clip)
-            self.log('grad_norm_generator', dec_grad)
-            if self.warmed_up:
-                dis_grad = nn.utils.clip_grad_norm_(
-                    self.discriminator.parameters(), grad_clip)
-                self.log('grad_norm_discriminator', dis_grad)
+        
 
         p.tick("log")
 
@@ -816,6 +833,11 @@ class RAVE(pl.LightningModule):
         return y
 
     def validation_step(self, batch, batch_idx):
+        # do this here so warmed_up gets set immediately when loading a checkpoint
+        # except it doesn't...why
+        if self.saved_step > self.warmup:
+            self.warmed_up = True
+            
         x = batch.unsqueeze(1)
 
         if self.pqmf is not None:
@@ -849,9 +871,6 @@ class RAVE(pl.LightningModule):
 
     def validation_epoch_end(self, out):
         audio, z = list(zip(*out))
-
-        if self.saved_step > self.warmup:
-            self.warmed_up = True
 
         # LATENT SPACE ANALYSIS
         if not self.warmed_up:

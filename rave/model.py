@@ -347,8 +347,10 @@ class Encoder(nn.Module):
 
     def forward(self, x, double=False):
         z = self.net(x)
+        # duplicate along batch dimension
         if double:
             z = z.repeat(2, *(1,)*(z.ndim-1))
+        # split into mean, scale parameters along channel dimension
         return torch.split(z, z.shape[1] // 2, 1)
 
 
@@ -428,6 +430,8 @@ class RAVE(pl.LightningModule):
                  d_n_layers,
                  pair_discriminator,
                  ged,
+                 gan,
+                 freeze_encoder,
                  warmup,
                  mode,
                  no_latency=False,
@@ -496,8 +500,6 @@ class RAVE(pl.LightningModule):
 
         self.automatic_optimization = False
 
-        self.warmup = warmup
-        self.warmed_up = False
         self.sr = sr
         self.mode = mode
 
@@ -624,25 +626,20 @@ class RAVE(pl.LightningModule):
         # two z samples per input
         use_pairs = self.hparams['pair_discriminator']
         use_ged = self.hparams['ged']
-        double_z = use_ged or (use_pairs and self.warmed_up)
+        use_gan = self.hparams['gan']
+        freeze_encoder = self.hparams['freeze_encoder']
+        double_z = use_ged or (use_pairs and use_gan)
 
         # ENCODE INPUT
-        if self.warmed_up:  # EVAL + FREEZE ENCODER
+        if freeze_encoder:
             self.encoder.eval()
             with torch.no_grad():
                 z, kl = self.reparametrize(*self.encoder(x, double=double_z))
         else:
             z, kl = self.reparametrize(*self.encoder(x, double=double_z))
 
-        # z, kl = self.reparametrize(*self.encoder(x))
-        # p.tick("encode")
-
-        # if self.warmed_up:  # FREEZE ENCODER
-        #     z = z.detach()
-        #     kl = kl.detach()
-
         # DECODE LATENT
-        y = self.decoder(z, add_noise=self.warmed_up or self.hparams['early_noise'])
+        y = self.decoder(z, add_noise=use_gan or self.hparams['early_noise'])
 
         if double_z:
             y, y2 = y.chunk(2)
@@ -679,7 +676,7 @@ class RAVE(pl.LightningModule):
         p.tick("loudness distance")
 
         feature_matching_distance = 0.
-        if self.warmed_up:  # DISCRIMINATION
+        if use_gan:  # DISCRIMINATION
             if use_pairs and not use_ged:
                 real = torch.cat((x, y), -2)
                 fake = torch.cat((y2, y), -2)
@@ -744,7 +741,7 @@ class RAVE(pl.LightningModule):
         beta = get_beta_kl_cyclic_annealed(
             step=self.global_step,
             cycle_size=5e4,
-            warmup=self.warmup // 2,
+            warmup=self.hparams['warmup'],
             min_beta=self.min_kl,
             max_beta=self.max_kl,
         )
@@ -756,7 +753,7 @@ class RAVE(pl.LightningModule):
         p.tick("gen loss compose")
 
         # OPTIMIZATION
-        is_disc_step = self.global_step % 2 and self.warmed_up
+        is_disc_step = self.global_step % 2 and use_gan
         grad_clip = self.hparams['grad_clip']
 
         if is_disc_step:
@@ -774,7 +771,7 @@ class RAVE(pl.LightningModule):
             loss_gen.backward()
 
             if grad_clip is not None:
-                if not self.warmed_up:
+                if not freeze_encoder:
                     enc_grad = nn.utils.clip_grad_norm_(
                         self.encoder.parameters(), grad_clip)
                     self.log('grad_norm_encoder', enc_grad)
@@ -802,7 +799,7 @@ class RAVE(pl.LightningModule):
         # beta-VAE parameter
         self.log("beta", beta)
 
-        if self.warmed_up:
+        if use_gan:
             # total discriminator loss
             self.log("loss_discriminator", loss_dis)
             self.log("pred_true", pred_true.mean())
@@ -833,10 +830,6 @@ class RAVE(pl.LightningModule):
         return y
 
     def validation_step(self, batch, batch_idx):
-        # do this here so warmed_up gets set immediately when loading a checkpoint
-        # except it doesn't...why
-        if self.saved_step > self.warmup:
-            self.warmed_up = True
             
         x = batch.unsqueeze(1)
 
@@ -845,7 +838,7 @@ class RAVE(pl.LightningModule):
 
         mean, scale = self.encoder(x)
         z, kl = self.reparametrize(mean, scale)
-        y = self.decoder(z, add_noise=self.warmed_up or self.hparams['early_noise'])
+        y = self.decoder(z, add_noise=self.hparams['gan'] or self.hparams['early_noise'])
 
         if self.pqmf is not None:
             x = self.pqmf.inverse(x)
@@ -873,7 +866,7 @@ class RAVE(pl.LightningModule):
         audio, z = list(zip(*out))
 
         # LATENT SPACE ANALYSIS
-        if not self.warmed_up:
+        if not self.hparams['freeze_encoder']:
             z = torch.cat(z, 0)
             z = rearrange(z, "b c t -> (b t) c")
 

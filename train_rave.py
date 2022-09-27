@@ -88,9 +88,13 @@ if __name__ == "__main__":
         # this should correspond to a more expressive likelihood
         # (and possibly be more compatible with the adversarial loss)
         GED = False
+        # enable GAN training
+        GAN = False
+        # stop encoder training
+        FREEZE_ENCODER = False
 
-        # number of VAE-only iterations
-        WARMUP = setting(default=1000000, small=1000000, large=3000000)
+        # this only affects KL annealing schedule now
+        WARMUP = setting(default=500000, small=500000, large=1500000)
         # type of GAN loss
         MODE = "hinge"
 
@@ -148,6 +152,8 @@ if __name__ == "__main__":
         d_n_layers=args.D_N_LAYERS,
         pair_discriminator=args.PAIR_DISCRIMINATOR,
         ged=args.GED,
+        gan=args.GAN,
+        freeze_encoder=args.FREEZE_ENCODER,
         warmup=args.WARMUP,
         mode=args.MODE,
         no_latency=args.NO_LATENCY,
@@ -248,6 +254,7 @@ if __name__ == "__main__":
         max_epochs=100000,
         max_steps=args.MAX_STEPS,
         num_sanity_val_steps=2,
+        log_every_n_steps=10,
         **val_check,
     )
 

@@ -191,7 +191,6 @@ class Generator(nn.Module):
                  data_size,
                  ratios,
                  loud_stride,
-                 use_noise,
                  noise_ratios,
                  noise_bands,
                  padding_mode,
@@ -253,7 +252,8 @@ class Generator(nn.Module):
 
         branches = [wave_gen, loud_gen]
 
-        if use_noise:
+        if noise_bands > 0:
+            self.has_noise_branch = True
             noise_gen = NoiseGenerator(
                 out_dim,
                 data_size,
@@ -262,20 +262,21 @@ class Generator(nn.Module):
                 padding_mode=padding_mode,
             )
             branches.append(noise_gen)
+        else:
+            self.has_noise_branch = False
 
         self.synth = cc.AlignBranches(
             *branches,
             cumulative_delay=self.net.cumulative_delay,
         )
 
-        self.use_noise = use_noise
         self.loud_stride = loud_stride
         self.cumulative_delay = self.synth.cumulative_delay
 
     def forward(self, x, add_noise: bool = True):
         x = self.net(x)
 
-        if self.use_noise:
+        if self.has_noise_branch:
             waveform, loudness, noise = self.synth(x)
         else:
             waveform, loudness = self.synth(x)
@@ -424,13 +425,12 @@ class RAVE(pl.LightningModule):
                  use_noise,
                  noise_ratios,
                  noise_bands,
-                 early_noise,
                  d_capacity,
                  d_multiplier,
                  d_n_layers,
                  pair_discriminator,
                  ged,
-                 gan,
+                 adversarial_loss,
                  freeze_encoder,
                  warmup,
                  mode,
@@ -475,20 +475,13 @@ class RAVE(pl.LightningModule):
             data_size,
             ratios,
             loud_stride,
-            use_noise,
             noise_ratios,
             noise_bands,
             "causal" if no_latency else "centered",
             bias,
         )
 
-        self.discriminator = StackDiscriminators(
-            3,
-            in_size=2 if self.hparams['pair_discriminator'] else 1,
-            capacity=d_capacity,
-            multiplier=d_multiplier,
-            n_layers=d_n_layers,
-        )
+        self._discriminator = None
 
         self.idx = 0
 
@@ -498,7 +491,7 @@ class RAVE(pl.LightningModule):
 
         self.latent_size = latent_size
 
-        self.automatic_optimization = False
+        self.automatic_optimization = False # is this lightning thing?
 
         self.sr = sr
         self.mode = mode
@@ -511,17 +504,51 @@ class RAVE(pl.LightningModule):
 
         self.register_buffer("saved_step", torch.tensor(0))
 
-    def configure_optimizers(self):
-        gen_p = list(self.encoder.parameters())
-        gen_p += list(self.decoder.parameters())
-        dis_p = list(self.discriminator.parameters())
+        self._gen_opt = self._dis_opt = None
 
-        gen_opt = torch.optim.Adam(
-            gen_p, self.hparams['gen_lr'], self.hparams['gen_adam_betas'])
-        dis_opt = torch.optim.Adam(
-            dis_p, self.hparams['dis_lr'], self.hparams['dis_adam_betas'])
+    @property
+    def discriminator(self):
+        if self._discriminator is None:
+            self._discriminator = StackDiscriminators(
+                3,
+                in_size=2 if self.hparams['pair_discriminator'] else 1,
+                capacity=self.hparams['d_capacity'],
+                multiplier=self.hparams['d_multiplier'],
+                n_layers=self.hparams['d_n_layers'],
+                )
+        return self._discriminator
 
-        return gen_opt, dis_opt
+    @property
+    def gen_opt(self):
+        if self._gen_opt is None:
+            gen_p = list(self.encoder.parameters())
+            gen_p += list(self.decoder.parameters())
+
+            self._gen_opt = torch.optim.Adam(
+                gen_p, self.hparams['gen_lr'], self.hparams['gen_adam_betas'])
+        return self._gen_opt
+
+    @property
+    def dis_opt(self):
+        if self._dis_opt is None:
+            dis_p = list(self.discriminator.parameters())
+
+            self._dis_opt = torch.optim.Adam(
+                dis_p, self.hparams['dis_lr'], self.hparams['dis_adam_betas'])
+
+        return self._dis_opt
+
+    # def configure_optimizers(self):
+    #     gen_p = list(self.encoder.parameters())
+    #     gen_p += list(self.decoder.parameters())
+    #     dis_p = list(self.discriminator.parameters())
+
+    #     gen_opt = torch.optim.Adam(
+    #         gen_p, self.hparams['gen_lr'], self.hparams['gen_adam_betas'])
+    #     dis_opt = torch.optim.Adam(
+    #         dis_p, self.hparams['dis_lr'], self.hparams['dis_adam_betas'])
+
+    #     return gen_opt, dis_opt
 
     def lin_distance(self, x, y):
         # is the norm across batch items (and bands...) a problem here?
@@ -626,9 +653,9 @@ class RAVE(pl.LightningModule):
         # two z samples per input
         use_pairs = self.hparams['pair_discriminator']
         use_ged = self.hparams['ged']
-        use_gan = self.hparams['gan']
+        use_discriminator = self.hparams['adversarial_loss'] or self.hparams['feature_match']
         freeze_encoder = self.hparams['freeze_encoder']
-        double_z = use_ged or (use_pairs and use_gan)
+        double_z = use_ged or (use_pairs and use_discriminator)
 
         # ENCODE INPUT
         if freeze_encoder:
@@ -639,7 +666,7 @@ class RAVE(pl.LightningModule):
             z, kl = self.reparametrize(*self.encoder(x, double=double_z))
 
         # DECODE LATENT
-        y = self.decoder(z, add_noise=use_gan or self.hparams['early_noise'])
+        y = self.decoder(z, add_noise=self.hparams['use_noise'])
 
         if double_z:
             y, y2 = y.chunk(2)
@@ -676,7 +703,7 @@ class RAVE(pl.LightningModule):
         p.tick("loudness distance")
 
         feature_matching_distance = 0.
-        if use_gan:  # DISCRIMINATION
+        if use_discriminator:  # DISCRIMINATION
             if use_pairs and not use_ged:
                 real = torch.cat((x, y), -2)
                 fake = torch.cat((y2, y), -2)
@@ -747,13 +774,15 @@ class RAVE(pl.LightningModule):
         )
         loss_kld = beta * kl
 
-        loss_gen = distance + loss_adv + loss_kld
+        loss_gen = distance + loss_kld
+        if self.hparams['adversarial_loss']:
+            loss_gen = loss_gen + loss_adv
         if self.feature_match:
             loss_gen = loss_gen + feature_matching_distance
         p.tick("gen loss compose")
 
         # OPTIMIZATION
-        is_disc_step = self.global_step % 2 and use_gan
+        is_disc_step = self.global_step % 2 and use_discriminator
         grad_clip = self.hparams['grad_clip']
 
         if is_disc_step:
@@ -799,7 +828,7 @@ class RAVE(pl.LightningModule):
         # beta-VAE parameter
         self.log("beta", beta)
 
-        if use_gan:
+        if use_discriminator:
             # total discriminator loss
             self.log("loss_discriminator", loss_dis)
             self.log("pred_true", pred_true.mean())
@@ -838,7 +867,7 @@ class RAVE(pl.LightningModule):
 
         mean, scale = self.encoder(x)
         z, kl = self.reparametrize(mean, scale)
-        y = self.decoder(z, add_noise=self.hparams['gan'] or self.hparams['early_noise'])
+        y = self.decoder(z, add_noise=self.hparams['use_noise'])
 
         if self.pqmf is not None:
             x = self.pqmf.inverse(x)

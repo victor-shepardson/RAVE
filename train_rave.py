@@ -59,15 +59,13 @@ if __name__ == "__main__":
         FEATURE_MATCH = True
         # architectural parameter for the generator (specifically, the ‘loudness’ branch)
         LOUD_STRIDE = 1
-        # enables the noise branch of the generator
+        # enables the noise branch of the generator during training
         USE_NOISE = True
         # downsampling ratios / network depth for the noise branch of the generator
         NOISE_RATIOS = [4, 4, 4]
         # number of noise bands *per* PQMF band in the generator (?)
+        # 0 for no noise generator at all
         NOISE_BANDS = 5
-        # whether to include noise   branch of generator
-        # in VAE training
-        EARLY_NOISE = False
 
         # CAPACITY but for the discriminator
         D_CAPACITY = 16
@@ -83,13 +81,15 @@ if __name__ == "__main__":
         # no change to the architecture.
         # (not sure how this interacts with FEATURE_MATCH)
         PAIR_DISCRIMINATOR = False
-        # changes the distance loss to use the generalized energy distance
+        # changes the distance losses to use the generalized energy distance
         # from http://arxiv.org/abs/2008.01160
         # this should correspond to a more expressive likelihood
         # (and possibly be more compatible with the adversarial loss)
         GED = False
-        # enable GAN training
-        GAN = False
+        # use GAN loss for generator training
+        # if this is False but FEATURE_MATCH is True,
+        # there will still be a discriminator
+        ADVERSARIAL_LOSS = False
         # stop encoder training
         FREEZE_ENCODER = False
 
@@ -146,13 +146,12 @@ if __name__ == "__main__":
         use_noise=args.USE_NOISE,
         noise_ratios=args.NOISE_RATIOS,
         noise_bands=args.NOISE_BANDS,
-        early_noise=args.EARLY_NOISE,
         d_capacity=args.D_CAPACITY,
         d_multiplier=args.D_MULTIPLIER,
         d_n_layers=args.D_N_LAYERS,
         pair_discriminator=args.PAIR_DISCRIMINATOR,
         ged=args.GED,
-        gan=args.GAN,
+        adversarial_loss=args.ADVERSARIAL_LOSS,
         freeze_encoder=args.FREEZE_ENCODER,
         warmup=args.WARMUP,
         mode=args.MODE,

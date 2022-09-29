@@ -292,6 +292,72 @@ class Generator(nn.Module):
 
         return waveform
 
+# class Encoder(nn.Module):
+#     def __init__(self,
+#                  data_size,
+#                  capacity,
+#                  latent_size,
+#                  ratios,
+#                  padding_mode,
+#                  use_bn,
+#                  bias=False):
+#         super().__init__()
+#         maybe_wn = (lambda x:x) if use_bn else wn
+
+#         net = [
+#             maybe_wn(cc.Conv1d(
+#                 data_size,
+#                 capacity,
+#                 7,
+#                 padding=cc.get_padding(7, mode=padding_mode),
+#                 bias=bias))
+#             ]
+
+#         for i, r in enumerate(ratios):
+#             in_dim = 2**i * capacity
+#             out_dim = 2**(i + 1) * capacity
+
+#             if use_bn:
+#                 net.append(nn.BatchNorm1d(in_dim))
+#             net.append(maybe_wn(
+#                 cc.Conv1d(
+#                     in_dim,
+#                     out_dim,
+#                     2 * r + 1,
+#                     padding=cc.get_padding(2 * r + 1, r, mode=padding_mode),
+#                     stride=r,
+#                     bias=bias,
+#                     cumulative_delay=net[-2 if use_bn else -1].cumulative_delay,
+#                 )))
+#             net.append(
+#                 ResidualStack(
+#                     out_dim,
+#                     3,
+#                     padding_mode,
+#                     cumulative_delay=net[-1].cumulative_delay,
+#                 ))
+
+#         net.append(maybe_wn(
+#             cc.Conv1d(
+#                 out_dim,
+#                 2 * latent_size,
+#                 5,
+#                 padding=cc.get_padding(5, mode=padding_mode),
+#                 groups=2,
+#                 bias=bias,
+#                 cumulative_delay=net[-1].cumulative_delay,
+#             )))
+
+#         self.net = cc.CachedSequential(*net)
+#         self.cumulative_delay = self.net.cumulative_delay
+
+#     def forward(self, x, double=False):
+#         z = self.net(x)
+#         # duplicate along batch dimension
+#         if double:
+#             z = z.repeat(2, *(1,)*(z.ndim-1))
+#         # split into mean, scale parameters along channel dimension
+#         return torch.split(z, z.shape[1] // 2, 1)
 
 class Encoder(nn.Module):
     def __init__(self,
@@ -306,12 +372,13 @@ class Encoder(nn.Module):
         maybe_wn = (lambda x:x) if use_bn else wn
 
         net = [
-            maybe_wn(cc.Conv1d(data_size,
-                      capacity,
-                      7,
-                      padding=cc.get_padding(7, mode=padding_mode),
-                      bias=bias))
-        ]
+            maybe_wn(cc.Conv1d(
+                data_size,
+                capacity,
+                7,
+                padding=cc.get_padding(7, mode=padding_mode),
+                bias=bias))
+            ]
 
         for i, r in enumerate(ratios):
             in_dim = 2**i * capacity
@@ -481,7 +548,16 @@ class RAVE(pl.LightningModule):
             bias,
         )
 
-        self._discriminator = None
+        if adversarial_loss or feature_match:
+            self.discriminator = StackDiscriminators(
+                3,
+                in_size=2 if self.hparams['pair_discriminator'] else 1,
+                capacity=self.hparams['d_capacity'],
+                multiplier=self.hparams['d_multiplier'],
+                n_layers=self.hparams['d_n_layers'],
+                )
+        else:
+            self.discriminator = None
 
         self.idx = 0
 
@@ -491,7 +567,8 @@ class RAVE(pl.LightningModule):
 
         self.latent_size = latent_size
 
-        self.automatic_optimization = False # is this lightning thing?
+        # tell lightning we are doing manual optimization
+        self.automatic_optimization = False 
 
         self.sr = sr
         self.mode = mode
@@ -504,51 +581,20 @@ class RAVE(pl.LightningModule):
 
         self.register_buffer("saved_step", torch.tensor(0))
 
-        self._gen_opt = self._dis_opt = None
+    def configure_optimizers(self):
+        gen_p = list(self.encoder.parameters())
+        gen_p += list(self.decoder.parameters())
+        gen_opt = torch.optim.Adam(
+            gen_p, self.hparams['gen_lr'], self.hparams['gen_adam_betas'])
 
-    @property
-    def discriminator(self):
-        if self._discriminator is None:
-            self._discriminator = StackDiscriminators(
-                3,
-                in_size=2 if self.hparams['pair_discriminator'] else 1,
-                capacity=self.hparams['d_capacity'],
-                multiplier=self.hparams['d_multiplier'],
-                n_layers=self.hparams['d_n_layers'],
-                )
-        return self._discriminator
+        if self.discriminator is None:
+            return gen_opt
 
-    @property
-    def gen_opt(self):
-        if self._gen_opt is None:
-            gen_p = list(self.encoder.parameters())
-            gen_p += list(self.decoder.parameters())
+        dis_p = list(self.discriminator.parameters())
+        dis_opt = torch.optim.Adam(
+            dis_p, self.hparams['dis_lr'], self.hparams['dis_adam_betas'])
 
-            self._gen_opt = torch.optim.Adam(
-                gen_p, self.hparams['gen_lr'], self.hparams['gen_adam_betas'])
-        return self._gen_opt
-
-    @property
-    def dis_opt(self):
-        if self._dis_opt is None:
-            dis_p = list(self.discriminator.parameters())
-
-            self._dis_opt = torch.optim.Adam(
-                dis_p, self.hparams['dis_lr'], self.hparams['dis_adam_betas'])
-
-        return self._dis_opt
-
-    # def configure_optimizers(self):
-    #     gen_p = list(self.encoder.parameters())
-    #     gen_p += list(self.decoder.parameters())
-    #     dis_p = list(self.discriminator.parameters())
-
-    #     gen_opt = torch.optim.Adam(
-    #         gen_p, self.hparams['gen_lr'], self.hparams['gen_adam_betas'])
-    #     dis_opt = torch.optim.Adam(
-    #         dis_p, self.hparams['dis_lr'], self.hparams['dis_adam_betas'])
-
-    #     return gen_opt, dis_opt
+        return gen_opt, dis_opt
 
     def lin_distance(self, x, y):
         # is the norm across batch items (and bands...) a problem here?
@@ -597,7 +643,7 @@ class RAVE(pl.LightningModule):
         if self.hparams['sample_kl']:
             log_std = scale.clamp(-7, 7)
             u = torch.randn_like(mean)
-            z = u * log_std.exp() + mean # z*z = u*u*std*std + mean*mean + 2u*std*mean
+            z = u * log_std.exp() + mean
             if self.hparams['path_derivative']:
                 log_std = log_std.detach()
                 mean = mean.detach()
@@ -642,7 +688,6 @@ class RAVE(pl.LightningModule):
         p = Profiler()
         self.saved_step += 1
 
-        gen_opt, dis_opt = self.optimizers()
         x = batch.unsqueeze(1)
 
         if self.pqmf is not None:  # MULTIBAND DECOMPOSITION
@@ -785,6 +830,11 @@ class RAVE(pl.LightningModule):
         is_disc_step = self.global_step % 2 and use_discriminator
         grad_clip = self.hparams['grad_clip']
 
+        if use_discriminator:
+            gen_opt, dis_opt = self.optimizers()
+        else:
+            gen_opt = self.optimizers()
+
         if is_disc_step:
             dis_opt.zero_grad()
             loss_dis.backward()
@@ -837,8 +887,6 @@ class RAVE(pl.LightningModule):
             self.log("loss_adversarial", loss_adv)
             # feature-matching loss
             self.log("loss_feature_matching", feature_matching_distance)
-
-        
 
         p.tick("log")
 
@@ -922,3 +970,6 @@ class RAVE(pl.LightningModule):
         self.logger.experiment.add_audio("audio_val", y,
                                          self.saved_step.item(), self.sr)
         self.idx += 1
+
+        # self.trainer.save_checkpoint('test')
+

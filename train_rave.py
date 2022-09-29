@@ -203,6 +203,7 @@ if __name__ == "__main__":
         generator=torch.Generator().manual_seed(42),
     )
 
+    # train = torch.utils.data.Subset(train, range(1600)) ###DEBUG
 
     num_workers = 0 if os.name == "nt" else 8
     train = DataLoader(train, args.BATCH, True, drop_last=True, num_workers=num_workers)
@@ -238,11 +239,12 @@ if __name__ == "__main__":
         use_gpu = 0
 
     val_check = {}
-    if len(train) >= args.VAL_EVERY:
+    if len(train) > args.VAL_EVERY:
         val_check["val_check_interval"] = args.VAL_EVERY
     else:
         nepoch = args.VAL_EVERY // len(train)
         val_check["check_val_every_n_epoch"] = nepoch
+    print(val_check)
 
     trainer = pl.Trainer(
         logger=pl.loggers.TensorBoardLogger(
@@ -252,7 +254,7 @@ if __name__ == "__main__":
         # callbacks=[validation_checkpoint, last_checkpoint],
         max_epochs=100000,
         max_steps=args.MAX_STEPS,
-        num_sanity_val_steps=2,
+        num_sanity_val_steps=4,
         log_every_n_steps=10,
         **val_check,
     )
@@ -262,6 +264,6 @@ if __name__ == "__main__":
     # if run is None: run = search_for_run(args.CKPT, mode="best")
     if run is not None:
         step = torch.load(run, map_location='cpu')["global_step"]
-        trainer.fit_loop.epoch_loop._batches_that_stepped = step
+        trainer.fit_loop.epoch_loop._batches_that_stepped = step #???
 
     trainer.fit(model, train, val, ckpt_path=run)

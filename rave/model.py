@@ -197,11 +197,14 @@ class Generator(nn.Module):
                  padding_mode,
                  bias=False):
         super().__init__()
+
+        out_dim = np.prod(ratios) * capacity
+
         net = [
             wn(
                 cc.Conv1d(
                     latent_size,
-                    2**len(ratios) * capacity,
+                    out_dim,
                     7,
                     padding=cc.get_padding(7, mode=padding_mode),
                     bias=bias,
@@ -209,8 +212,8 @@ class Generator(nn.Module):
         ]
 
         for i, r in enumerate(ratios):
-            in_dim = 2**(len(ratios) - i) * capacity
-            out_dim = 2**(len(ratios) - i - 1) * capacity
+            in_dim = out_dim
+            out_dim = out_dim//r
 
             net.append(
                 UpsampleLayer(
@@ -305,18 +308,20 @@ class Encoder(nn.Module):
         super().__init__()
         maybe_wn = (lambda x:x) if use_bn else wn
 
+        out_dim = capacity
+
         net = [
             maybe_wn(cc.Conv1d(
                 data_size,
-                capacity,
+                out_dim,
                 7,
                 padding=cc.get_padding(7, mode=padding_mode),
                 bias=bias))
             ]
 
         for i, r in enumerate(ratios):
-            in_dim = 2**i * capacity
-            out_dim = 2**(i + 1) * capacity
+            in_dim = out_dim
+            out_dim = out_dim * r
 
             if use_bn:
                 net.append(nn.BatchNorm1d(in_dim))

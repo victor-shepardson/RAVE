@@ -54,13 +54,14 @@ class ResidualStack(nn.Module):
                  kernel_size,
                  padding_mode,
                  cumulative_delay=0,
-                 bias=False):
+                 bias=False,
+                 depth=3):
         super().__init__()
         net = []
 
         res_cum_delay = 0
         # SEQUENTIAL RESIDUALS
-        for i in range(3):
+        for i in range(depth):
             # RESIDUAL BLOCK
             seq = [nn.LeakyReLU(.2)]
             seq.append(
@@ -111,7 +112,7 @@ class UpsampleLayer(nn.Module):
                  cumulative_delay=0,
                  bias=False):
         super().__init__()
-        net = [nn.LeakyReLU(.2)]
+        net = []#[nn.LeakyReLU(.2)]
         if ratio > 1:
             net.append(
                 wn(
@@ -292,73 +293,6 @@ class Generator(nn.Module):
 
         return waveform
 
-# class Encoder(nn.Module):
-#     def __init__(self,
-#                  data_size,
-#                  capacity,
-#                  latent_size,
-#                  ratios,
-#                  padding_mode,
-#                  use_bn,
-#                  bias=False):
-#         super().__init__()
-#         maybe_wn = (lambda x:x) if use_bn else wn
-
-#         net = [
-#             maybe_wn(cc.Conv1d(
-#                 data_size,
-#                 capacity,
-#                 7,
-#                 padding=cc.get_padding(7, mode=padding_mode),
-#                 bias=bias))
-#             ]
-
-#         for i, r in enumerate(ratios):
-#             in_dim = 2**i * capacity
-#             out_dim = 2**(i + 1) * capacity
-
-#             if use_bn:
-#                 net.append(nn.BatchNorm1d(in_dim))
-#             net.append(maybe_wn(
-#                 cc.Conv1d(
-#                     in_dim,
-#                     out_dim,
-#                     2 * r + 1,
-#                     padding=cc.get_padding(2 * r + 1, r, mode=padding_mode),
-#                     stride=r,
-#                     bias=bias,
-#                     cumulative_delay=net[-2 if use_bn else -1].cumulative_delay,
-#                 )))
-#             net.append(
-#                 ResidualStack(
-#                     out_dim,
-#                     3,
-#                     padding_mode,
-#                     cumulative_delay=net[-1].cumulative_delay,
-#                 ))
-
-#         net.append(maybe_wn(
-#             cc.Conv1d(
-#                 out_dim,
-#                 2 * latent_size,
-#                 5,
-#                 padding=cc.get_padding(5, mode=padding_mode),
-#                 groups=2,
-#                 bias=bias,
-#                 cumulative_delay=net[-1].cumulative_delay,
-#             )))
-
-#         self.net = cc.CachedSequential(*net)
-#         self.cumulative_delay = self.net.cumulative_delay
-
-#     def forward(self, x, double=False):
-#         z = self.net(x)
-#         # duplicate along batch dimension
-#         if double:
-#             z = z.repeat(2, *(1,)*(z.ndim-1))
-#         # split into mean, scale parameters along channel dimension
-#         return torch.split(z, z.shape[1] // 2, 1)
-
 class Encoder(nn.Module):
     def __init__(self,
                  data_size,
@@ -386,7 +320,6 @@ class Encoder(nn.Module):
 
             if use_bn:
                 net.append(nn.BatchNorm1d(in_dim))
-            net.append(nn.LeakyReLU(.2))
             net.append(maybe_wn(
                 cc.Conv1d(
                     in_dim,
@@ -395,10 +328,17 @@ class Encoder(nn.Module):
                     padding=cc.get_padding(2 * r + 1, r, mode=padding_mode),
                     stride=r,
                     bias=bias,
-                    cumulative_delay=net[-3 if use_bn else -2].cumulative_delay,
+                    cumulative_delay=net[-2 if use_bn else -1].cumulative_delay,
                 )))
+            net.append(
+                ResidualStack(
+                    out_dim,
+                    3,
+                    padding_mode,
+                    cumulative_delay=net[-1].cumulative_delay,
+                    depth=1
+                ))
 
-        net.append(nn.LeakyReLU(.2))
         net.append(maybe_wn(
             cc.Conv1d(
                 out_dim,
@@ -407,7 +347,7 @@ class Encoder(nn.Module):
                 padding=cc.get_padding(5, mode=padding_mode),
                 groups=2,
                 bias=bias,
-                cumulative_delay=net[-2].cumulative_delay,
+                cumulative_delay=net[-1].cumulative_delay,
             )))
 
         self.net = cc.CachedSequential(*net)
@@ -420,6 +360,68 @@ class Encoder(nn.Module):
             z = z.repeat(2, *(1,)*(z.ndim-1))
         # split into mean, scale parameters along channel dimension
         return torch.split(z, z.shape[1] // 2, 1)
+
+# class Encoder(nn.Module):
+#     def __init__(self,
+#                  data_size,
+#                  capacity,
+#                  latent_size,
+#                  ratios,
+#                  padding_mode,
+#                  use_bn,
+#                  bias=False):
+#         super().__init__()
+#         maybe_wn = (lambda x:x) if use_bn else wn
+
+#         net = [
+#             maybe_wn(cc.Conv1d(
+#                 data_size,
+#                 capacity,
+#                 7,
+#                 padding=cc.get_padding(7, mode=padding_mode),
+#                 bias=bias))
+#             ]
+
+#         for i, r in enumerate(ratios):
+#             in_dim = 2**i * capacity
+#             out_dim = 2**(i + 1) * capacity
+
+#             if use_bn:
+#                 net.append(nn.BatchNorm1d(in_dim))
+#             net.append(nn.LeakyReLU(.2))
+#             net.append(maybe_wn(
+#                 cc.Conv1d(
+#                     in_dim,
+#                     out_dim,
+#                     2 * r + 1,
+#                     padding=cc.get_padding(2 * r + 1, r, mode=padding_mode),
+#                     stride=r,
+#                     bias=bias,
+#                     cumulative_delay=net[-3 if use_bn else -2].cumulative_delay,
+#                 )))
+
+#         net.append(nn.LeakyReLU(.2))
+#         net.append(maybe_wn(
+#             cc.Conv1d(
+#                 out_dim,
+#                 2 * latent_size,
+#                 5,
+#                 padding=cc.get_padding(5, mode=padding_mode),
+#                 groups=2,
+#                 bias=bias,
+#                 cumulative_delay=net[-2].cumulative_delay,
+#             )))
+
+#         self.net = cc.CachedSequential(*net)
+#         self.cumulative_delay = self.net.cumulative_delay
+
+#     def forward(self, x, double=False):
+#         z = self.net(x)
+#         # duplicate along batch dimension
+#         if double:
+#             z = z.repeat(2, *(1,)*(z.ndim-1))
+#         # split into mean, scale parameters along channel dimension
+#         return torch.split(z, z.shape[1] // 2, 1)
 
 
 class Discriminator(nn.Module):

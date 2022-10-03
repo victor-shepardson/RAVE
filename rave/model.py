@@ -469,8 +469,9 @@ class Discriminator(nn.Module):
 
 
 class StackDiscriminators(nn.Module):
-    def __init__(self, n_dis, *args, **kwargs):
+    def __init__(self, n_dis, *args, factor=2, **kwargs):
         super().__init__()
+        self.factor = factor
         self.discriminators = nn.ModuleList(
             [Discriminator(*args, **kwargs) for i in range(n_dis)], )
 
@@ -478,7 +479,7 @@ class StackDiscriminators(nn.Module):
         features = []
         for layer in self.discriminators:
             features.append(layer(x))
-            x = nn.functional.avg_pool1d(x, 2)
+            x = nn.functional.avg_pool1d(x, self.factor)
         return features
 
 
@@ -497,6 +498,7 @@ class RAVE(pl.LightningModule):
                  d_capacity,
                  d_multiplier,
                  d_n_layers,
+                 d_stack_factor,
                  pair_discriminator,
                  ged,
                  adversarial_loss,
@@ -552,11 +554,11 @@ class RAVE(pl.LightningModule):
 
         if adversarial_loss or feature_match:
             self.discriminator = StackDiscriminators(
-                3,
-                in_size=2 if self.hparams['pair_discriminator'] else 1,
-                capacity=self.hparams['d_capacity'],
-                multiplier=self.hparams['d_multiplier'],
-                n_layers=self.hparams['d_n_layers'],
+                3, factor=d_stack_factor,
+                in_size=2 if pair_discriminator else 1,
+                capacity=d_capacity,
+                multiplier=d_multiplier,
+                n_layers=d_n_layers
                 )
         else:
             self.discriminator = None
@@ -908,7 +910,7 @@ class RAVE(pl.LightningModule):
             y = self.pqmf.inverse(y)
         return y
 
-    def validation_step(self, batch, batch_idx):
+    def validation_step(self, batch, batch_idx, loader_idx):
             
         x = batch.unsqueeze(1)
 
@@ -916,7 +918,16 @@ class RAVE(pl.LightningModule):
             x = self.pqmf(x)
 
         mean, scale = self.encoder(x)
-        z, kl = self.reparametrize(mean, scale)
+
+        if loader_idx>0:
+            # z = mean
+            z = torch.cat((
+                mean, 
+                mean + torch.randn((z.shape[0], z.shape[1], 1), device=z.device)),
+                0)
+        else:
+            z, kl = self.reparametrize(mean, scale)
+
         y = self.decoder(z, add_noise=self.hparams['use_noise'])
 
         if self.pqmf is not None:
@@ -925,14 +936,17 @@ class RAVE(pl.LightningModule):
 
         distance = self.distance(x, y)
 
-        if self.trainer is not None:
+        if loader_idx==0 and self.trainer is not None:
             # full-band distance only,
             # in contrast to training distance
             # KLD in bits per second
             self.log("valid_distance", distance)
             self.log("valid_kld_bps", self.npz_to_bps(kl))
 
-        return torch.cat([x, y], -1), mean
+        if loader_idx==0:
+            return torch.cat([x, y], -1), mean
+        if loader_idx>0:
+            return torch.cat([x, *y.chunk(2, 0)], -1), mean
 
     def npz_to_bps(self, npz):
         """convert nats per z frame to bits per second"""
@@ -941,37 +955,38 @@ class RAVE(pl.LightningModule):
             / self.hparams['data_size'] 
             * np.log2(np.e))
 
-    def validation_epoch_end(self, out):
-        audio, z = list(zip(*out))
+    def validation_epoch_end(self, outs):
+        for (out, tag) in zip(outs, ('valid', 'test')):
 
-        # LATENT SPACE ANALYSIS
-        if not self.hparams['freeze_encoder']:
-            z = torch.cat(z, 0)
-            z = rearrange(z, "b c t -> (b t) c")
+            audio, z = list(zip(*out))
 
-            self.latent_mean.copy_(z.mean(0))
-            z = z - self.latent_mean
+            # LATENT SPACE ANALYSIS
+            if tag=='valid' and not self.hparams['freeze_encoder']:
+                z = torch.cat(z, 0)
+                z = rearrange(z, "b c t -> (b t) c")
 
-            pca = PCA(z.shape[-1]).fit(z.cpu().numpy())
+                self.latent_mean.copy_(z.mean(0))
+                z = z - self.latent_mean
 
-            components = pca.components_
-            components = torch.from_numpy(components).to(z)
-            self.latent_pca.copy_(components)
+                pca = PCA(z.shape[-1]).fit(z.cpu().numpy())
 
-            var = pca.explained_variance_ / np.sum(pca.explained_variance_)
-            var = np.cumsum(var)
+                components = pca.components_
+                components = torch.from_numpy(components).to(z)
+                self.latent_pca.copy_(components)
 
-            self.fidelity.copy_(torch.from_numpy(var).to(self.fidelity))
+                var = pca.explained_variance_ / np.sum(pca.explained_variance_)
+                var = np.cumsum(var)
 
-            var_percent = [.8, .9, .95, .99]
-            for p in var_percent:
-                self.log(f"{p}%_manifold",
-                         np.argmax(var > p).astype(np.float32))
+                self.fidelity.copy_(torch.from_numpy(var).to(self.fidelity))
 
-        y = torch.cat(audio, 0)[:64].reshape(-1)
-        self.logger.experiment.add_audio("audio_val", y,
-                                         self.saved_step.item(), self.sr)
+                var_percent = [.8, .9, .95, .99]
+                for p in var_percent:
+                    self.log(f"{p}%_manifold",
+                            np.argmax(var > p).astype(np.float32))
+
+            n = 32 if tag=='valid' else 16
+            y = torch.cat(audio, 0)[:n].reshape(-1)
+            self.logger.experiment.add_audio(
+                f"audio_{tag}", y, self.saved_step.item(), self.sr)
+
         self.idx += 1
-
-        # self.trainer.save_checkpoint('test')
-

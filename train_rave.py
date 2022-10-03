@@ -23,8 +23,10 @@ if __name__ == "__main__":
 
         # number of channels in PQMF filter
         DATA_SIZE = 16
-        # *not* a latent variable capacity in bits, but a rough ‘model capacity’ which scales hidden layer sizes
-        CAPACITY = setting(default=64, small=32, large=64)
+        # hidden layer width for the encoder and generator
+        # if CAPACITY == DATA_SIZE, data dimension is preserved throughout
+        # (except for the latent bottleneck)
+        CAPACITY = setting(default=32, small=16, large=32)
         # number of latent dimensions before pruning
         LATENT_SIZE = 128
         # passed directly to conv layers apparently
@@ -73,6 +75,8 @@ if __name__ == "__main__":
         D_MULTIPLIER = 4
         # discriminator depth
         D_N_LAYERS = 4
+        # stacked discriminator pooling factor
+        D_STACK_FACTOR = 2
         # changes the discriminator to operate on (real, fake) vs (fake, fake) 
         # pairs, which has the effect of making it a conditional GAN:
         # it learns whether y is a realistic reconstruction from z,
@@ -102,8 +106,12 @@ if __name__ == "__main__":
         CKPT = None
         # path to store preprocessed dataset, or to already preprocessed data
         PREPROCESSED = None
+        TEST_PREPROCESSED = None
         # path to raw dataset
         WAV = None
+        TEST_WAV = None
+        # number of samples in test set
+        N_TEST = None
         # audio sample rate
         SR = 48000
         # end training after this many iterations
@@ -149,6 +157,7 @@ if __name__ == "__main__":
         d_capacity=args.D_CAPACITY,
         d_multiplier=args.D_MULTIPLIER,
         d_n_layers=args.D_N_LAYERS,
+        d_stack_factor=args.D_STACK_FACTOR,
         pair_discriminator=args.PAIR_DISCRIMINATOR,
         ged=args.GED,
         adversarial_loss=args.ADVERSARIAL_LOSS,
@@ -171,7 +180,7 @@ if __name__ == "__main__":
     )
 
     x = torch.zeros(args.BATCH, 2**14)
-    model.validation_step(x, 0)
+    model.validation_step(x, 0, 0)
 
     preprocess = lambda name: simple_audio_preprocess(
         args.SR,
@@ -195,6 +204,34 @@ if __name__ == "__main__":
         ]),
     )
 
+    def test_preprocess(name):
+        s = simple_audio_preprocess(
+            args.SR,
+            8 * args.N_SIGNAL,
+        )(name)
+        return None if s is None else s.astype(np.float16)
+    # test_preprocess = lambda name: simple_audio_preprocess(
+    #     args.SR,
+    #     8 * args.N_SIGNAL,
+    # )(name).astype(np.float16)
+
+    test = SimpleDataset(
+        args.TEST_PREPROCESSED,
+        args.TEST_WAV,
+        preprocess_function=test_preprocess,
+        split_set="full",
+        transforms=Compose([
+            lambda x: x.astype(np.float32),
+            # RandomCrop(args.N_SIGNAL),
+            # RandomApply(
+            #     lambda x: random_phase_mangle(x, 20, 2000, .99, args.SR),
+            #     p=.8,
+            # ),
+            Dequantize(16),
+            lambda x: x.astype(np.float32),
+        ]),
+    )
+
     val = max((2 * len(dataset)) // 100, 1)
     train = len(dataset) - val
     train, val = random_split(
@@ -202,12 +239,16 @@ if __name__ == "__main__":
         [train, val],
         generator=torch.Generator().manual_seed(42),
     )
+    if args.N_TEST is not None:
+        test = torch.utils.data.Subset(test, torch.randperm(
+            len(test), torch.Generator().manual_seed(42))[:args.N_TEST])
 
     # train = torch.utils.data.Subset(train, range(1600)) ###DEBUG
 
     num_workers = 0 if os.name == "nt" else 8
     train = DataLoader(train, args.BATCH, True, drop_last=True, num_workers=num_workers)
     val = DataLoader(val, args.BATCH, False, num_workers=num_workers)
+    test = DataLoader(test, args.BATCH//4, False, num_workers=num_workers)
 
     # CHECKPOINT CALLBACKS
     # validation_checkpoint = pl.callbacks.ModelCheckpoint(
@@ -266,4 +307,4 @@ if __name__ == "__main__":
         step = torch.load(run, map_location='cpu')["global_step"]
         trainer.fit_loop.epoch_loop._batches_that_stepped = step #???
 
-    trainer.fit(model, train, val, ckpt_path=run)
+    trainer.fit(model, train, [val, test], ckpt_path=run)

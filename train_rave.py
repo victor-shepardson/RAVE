@@ -111,7 +111,7 @@ if __name__ == "__main__":
         WAV = None
         TEST_WAV = None
         # number of samples in test set
-        N_TEST = None
+        N_TEST = -1
         # audio sample rate
         SR = 48000
         # end training after this many iterations
@@ -207,7 +207,7 @@ if __name__ == "__main__":
     def test_preprocess(name):
         s = simple_audio_preprocess(
             args.SR,
-            8 * args.N_SIGNAL,
+            4 * args.N_SIGNAL,
         )(name)
         return None if s is None else s.astype(np.float16)
     # test_preprocess = lambda name: simple_audio_preprocess(
@@ -239,16 +239,16 @@ if __name__ == "__main__":
         [train, val],
         generator=torch.Generator().manual_seed(42),
     )
-    if args.N_TEST is not None:
+    if args.N_TEST > 0:
         test = torch.utils.data.Subset(test, torch.randperm(
-            len(test), torch.Generator().manual_seed(42))[:args.N_TEST])
+            len(test), generator=torch.Generator().manual_seed(42))[:args.N_TEST])
 
     # train = torch.utils.data.Subset(train, range(1600)) ###DEBUG
 
     num_workers = 0 if os.name == "nt" else 8
     train = DataLoader(train, args.BATCH, True, drop_last=True, num_workers=num_workers)
     val = DataLoader(val, args.BATCH, False, num_workers=num_workers)
-    test = DataLoader(test, args.BATCH//4, False, num_workers=num_workers)
+    test = DataLoader(test, args.BATCH//2, False, num_workers=num_workers)
 
     # CHECKPOINT CALLBACKS
     # validation_checkpoint = pl.callbacks.ModelCheckpoint(

@@ -715,10 +715,12 @@ class RAVE(pl.LightningModule):
         p = Profiler()
         self.saved_step += 1
 
-        x = batch.unsqueeze(1)
+        x = batch['source'].unsqueeze(1)
+        target = batch['target'].unsqueeze(1)
 
         if self.pqmf is not None:  # MULTIBAND DECOMPOSITION
             x = self.pqmf(x)
+            target = self.pqmf(target)
             p.tick("pqmf")
 
         # GED reconstruction and pair discriminator both require
@@ -747,28 +749,28 @@ class RAVE(pl.LightningModule):
         p.tick("decode")
 
         # DISTANCE BETWEEN INPUT AND OUTPUT
-        distance = self.distance(x, y, y2 if use_ged else None)
+        distance = self.distance(target, y, y2 if use_ged else None)
         p.tick("mb distance")
 
         if self.pqmf is not None:  # FULL BAND RECOMPOSITION
             # why run inverse pqmf on x instead of
             # saving original audio?
             # some trimming edge case?
-            x = self.pqmf.inverse(x)
+            target = self.pqmf.inverse(target)
             y = self.pqmf.inverse(y)
             if y2 is not None:
                 y2 = self.pqmf.inverse(y2)
-            distance = distance + self.distance(x, y, y2 if use_ged else None)
+            distance = distance + self.distance(target, y, y2 if use_ged else None)
             p.tick("fb distance")
 
         if use_ged:
-            loud_x, loud_y, loud_y2 = self.loudness(torch.cat((x,y,y2))).chunk(3)
+            loud_x, loud_y, loud_y2 = self.loudness(torch.cat((target,y,y2))).chunk(3)
             loud_dist = (
                 (loud_x - loud_y).pow(2).mean()
                 + (loud_x - loud_y2).pow(2).mean() 
                 - (loud_y2 - loud_y).pow(2).mean())
         else:
-            loud_x, loud_y = self.loudness(torch.cat((x,y))).chunk(2)
+            loud_x, loud_y = self.loudness(torch.cat((target,y))).chunk(2)
             loud_dist = (loud_x - loud_y).pow(2).mean()
 
         distance = distance + loud_dist
@@ -776,19 +778,21 @@ class RAVE(pl.LightningModule):
 
         feature_matching_distance = 0.
         if use_discriminator:  # DISCRIMINATION
+            # note -- could run x and target both through discriminator here
+            # shouldn't matter which one is used (?)
             if use_pairs and not use_ged:
-                real = torch.cat((x, y), -2)
+                real = torch.cat((target, y), -2)
                 fake = torch.cat((y2, y), -2)
                 to_disc = torch.cat((real, fake))
             if use_pairs and use_ged:
-                real = torch.cat((x, y), -2)
+                real = torch.cat((target, y), -2)
                 fake = torch.cat((y2, y), -2)
                 fake2 = torch.cat((y, y2), -2)
                 to_disc = torch.cat((real, fake, fake2))
             if not use_pairs and use_ged:
-                to_disc = torch.cat((x, y, y2))
+                to_disc = torch.cat((target, y, y2))
             if not use_pairs and not use_ged:
-                to_disc = torch.cat((x, y))
+                to_disc = torch.cat((target, y))
             discs_features = self.discriminator(to_disc)
 
             # all but final layer in each parallel discriminator
@@ -831,10 +835,10 @@ class RAVE(pl.LightningModule):
                     map(dist, feature_maps)) / len(feature_maps)
 
         else:
-            pred_true = batch.new_zeros(1)
-            pred_fake = batch.new_zeros(1)
-            loss_dis = batch.new_zeros(1)
-            loss_adv = batch.new_zeros(1)
+            pred_true = x.new_zeros(1)
+            pred_fake = x.new_zeros(1)
+            loss_dis = x.new_zeros(1)
+            loss_adv = x.new_zeros(1)
 
         # COMPOSE GEN LOSS
         # beta = get_beta_kl_cyclic_annealed(
@@ -937,10 +941,12 @@ class RAVE(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx, loader_idx):
             
-        x = batch.unsqueeze(1)
+        x = batch['source'].unsqueeze(1)
+        target = batch['target'].unsqueeze(1)
 
         if self.pqmf is not None:
             x = self.pqmf(x)
+            target = self.pqmf(target)
 
         mean, scale = self.encoder(x)
 
@@ -957,10 +963,10 @@ class RAVE(pl.LightningModule):
         # print(x.shape, z.shape, y.shape)
 
         if self.pqmf is not None:
-            x = self.pqmf.inverse(x)
+            target = self.pqmf.inverse(target)
             y = self.pqmf.inverse(y)
 
-        distance = self.distance(x, y)
+        distance = self.distance(target, y)
 
         if loader_idx==0 and self.trainer is not None:
             # full-band distance only,
@@ -970,9 +976,9 @@ class RAVE(pl.LightningModule):
             self.log("valid_kld_bps", self.npz_to_bps(kl))
 
         if loader_idx==0:
-            return torch.cat([x, y], -1), mean
+            return torch.cat([target, y], -1), mean
         if loader_idx>0:
-            return torch.cat([x, *y.chunk(2, 0)], -1), mean
+            return torch.cat([target, *y.chunk(2, 0)], -1), mean
 
     def npz_to_bps(self, npz):
         """convert nats per z frame to bits per second"""

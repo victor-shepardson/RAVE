@@ -182,7 +182,11 @@ if __name__ == "__main__":
         grad_clip=args.GRAD_CLIP,
     )
 
-    x = torch.zeros(args.BATCH, 2**14)
+    x = {
+        'source':torch.zeros(args.BATCH, 2**14),
+        'target':torch.zeros(args.BATCH, 2**14)
+    }
+
     model.validation_step(x, 0, 0)
 
     preprocess = lambda name: simple_audio_preprocess(
@@ -198,14 +202,14 @@ if __name__ == "__main__":
         transforms=Compose([
             lambda x: x.astype(np.float32),
             RandomCrop(args.N_SIGNAL),
-            RandomApply(
-                lambda x: random_phase_mangle(x, 20, 2000, .99, args.SR),
-                p=.8,
-            ),
-            Dequantize(16),
-            lambda x: x.astype(np.float32),
-        ]),
-    )
+            # RandomApply(
+            lambda x: {
+                tag: Dequantize(16)(
+                    random_phase_mangle(x, 20, 2000, .99, args.SR)
+                    ).astype(np.float32)
+                for tag in ('source', 'target')}
+            ])
+        )
 
     def test_preprocess(name):
         s = simple_audio_preprocess(
@@ -231,7 +235,10 @@ if __name__ == "__main__":
             #     p=.8,
             # ),
             Dequantize(16),
-            lambda x: x.astype(np.float32),
+            lambda x: {
+                'source': x.astype(np.float32),
+                'target': x.astype(np.float32),
+                },
         ]),
     )
 

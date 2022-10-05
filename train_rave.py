@@ -94,14 +94,16 @@ if __name__ == "__main__":
         # if this is False but FEATURE_MATCH is True,
         # there will still be a discriminator
         ADVERSARIAL_LOSS = False
+        # type of GAN loss
+        MODE = "hinge"
         # stop encoder training
         FREEZE_ENCODER = False
 
         # this only affects KL annealing schedule now
         WARMUP = setting(default=500000, small=500000, large=1500000)
-        # type of GAN loss
-        MODE = "hinge"
-
+        # steps to cycle the KLD if MIN_KL and MAX_KL differ
+        # KL_CYCLE = 50000
+        
         # checkpoint to resume training from
         CKPT = None
         # path to store preprocessed dataset, or to already preprocessed data
@@ -163,6 +165,7 @@ if __name__ == "__main__":
         adversarial_loss=args.ADVERSARIAL_LOSS,
         freeze_encoder=args.FREEZE_ENCODER,
         warmup=args.WARMUP,
+        # kl_cycle=args.KL_CYCLE,
         mode=args.MODE,
         no_latency=args.NO_LATENCY,
         sr=args.SR,

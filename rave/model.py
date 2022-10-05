@@ -4,7 +4,7 @@ import torch.nn.utils.weight_norm as wn
 import numpy as np
 import pytorch_lightning as pl
 from .core import multiscale_stft, Loudness, mod_sigmoid
-from .core import amp_to_impulse_response, fft_convolve, get_beta_kl_cyclic_annealed
+from .core import amp_to_impulse_response, fft_convolve, get_beta_kl_cyclic_annealed, get_beta_kl
 from .pqmf import CachedPQMF as PQMF
 from sklearn.decomposition import PCA
 from einops import rearrange
@@ -312,6 +312,8 @@ class Encoder(nn.Module):
 
         out_dim = capacity
 
+        # try a longer kernel here?
+        # and maybe a rectifying activation?
         net = [
             maybe_wn(cc.Conv1d(
                 data_size,
@@ -517,6 +519,7 @@ class RAVE(pl.LightningModule):
                  adversarial_loss,
                  freeze_encoder,
                  warmup,
+                #  kl_cycle,
                  mode,
                  no_latency=False,
                  min_kl=1e-4,
@@ -834,13 +837,15 @@ class RAVE(pl.LightningModule):
             loss_adv = batch.new_zeros(1)
 
         # COMPOSE GEN LOSS
-        beta = get_beta_kl_cyclic_annealed(
-            step=self.global_step,
-            cycle_size=5e4,
-            warmup=self.hparams['warmup'],
-            min_beta=self.min_kl,
-            max_beta=self.max_kl,
-        )
+        # beta = get_beta_kl_cyclic_annealed(
+        #     step=self.global_step,
+        #     cycle_size=self.hparams['kl_cycle'],
+        #     warmup=self.hparams['warmup'],
+        #     min_beta=self.min_kl,
+        #     max_beta=self.max_kl,
+        # )
+        beta = get_beta_kl(
+            self.global_step, self.hparams['warmup'], self.min_kl, self.max_kl)
         loss_kld = beta * kl
 
         loss_gen = distance + loss_kld

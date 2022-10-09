@@ -68,7 +68,7 @@ class ResidualStack(nn.Module):
                 wn(
                     cc.Conv1d(
                         dim,
-                        dim,
+                        dim*2,
                         kernel_size,
                         padding=cc.get_padding(
                             kernel_size,
@@ -77,16 +77,17 @@ class ResidualStack(nn.Module):
                         ),
                         dilation=3**i,
                         bias=bias,
+                        groups=dim//16,
                     )))
 
             seq.append(nn.LeakyReLU(.2))
             seq.append(
                 wn(
                     cc.Conv1d(
+                        dim*2,
                         dim,
-                        dim,
-                        kernel_size,
-                        padding=cc.get_padding(kernel_size, mode=padding_mode),
+                        1,
+                        # padding=cc.get_padding(kernel_size, mode=padding_mode),
                         bias=bias,
                         cumulative_delay=seq[-2].cumulative_delay,
                     )))
@@ -626,11 +627,13 @@ class RAVE(pl.LightningModule):
     def lin_distance(self, x, y):
         # is the norm across batch items (and bands...) a problem here?
         # return torch.norm(x - y)
-        return torch.linalg.vector_norm(x - y, dim=(-1,-2,-3)).mean()
+        # return torch.linalg.vector_norm(x - y, dim=(-1,-2,-3)).mean()
+        return torch.linalg.vector_norm(x - y, dim=tuple(range(1, x.ndim))).mean()
 
     def norm_lin_distance(self, x, y):
         # return torch.norm(x - y) / torch.norm(x)
-        norm = lambda z: torch.linalg.vector_norm(z, dim=(-1,-2,-3))
+        # norm = lambda z: torch.linalg.vector_norm(z, dim=(-1,-2,-3))
+        norm = lambda z: torch.linalg.vector_norm(z, dim=tuple(range(1, z.ndim)))
         return (norm(x - y) / norm(x)).mean()
 
     def log_distance(self, x, y):
@@ -649,8 +652,8 @@ class RAVE(pl.LightningModule):
         stfts = multiscale_stft(torch.cat(parts), scales, .75)
         if y2 is None:
             x, y = zip(*(s.chunk(2) for s in stfts))
-            lin = sum(list(map(self.lin_distance, x, y)))
-            log = sum(list(map(self.log_distance, x, y)))
+            lin = sum(map(self.lin_distance, x, y))
+            log = sum(map(self.log_distance, x, y))
         else:
             x, y, y2 = zip(*(s.chunk(3) for s in stfts))
             # print([s.shape for s in x])
@@ -963,16 +966,19 @@ class RAVE(pl.LightningModule):
         # print(x.shape, z.shape, y.shape)
 
         if self.pqmf is not None:
+            x = self.pqmf.inverse(x)
             target = self.pqmf.inverse(target)
             y = self.pqmf.inverse(y)
 
         distance = self.distance(target, y)
+        baseline_distance = self.distance(target, x)
 
         if loader_idx==0 and self.trainer is not None:
             # full-band distance only,
             # in contrast to training distance
             # KLD in bits per second
             self.log("valid_distance", distance)
+            self.log("valid_distance/baseline", baseline_distance)
             self.log("valid_kld_bps", self.npz_to_bps(kl))
 
         if loader_idx==0:

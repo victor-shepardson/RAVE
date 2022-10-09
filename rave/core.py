@@ -36,13 +36,12 @@ def multiscale_stft(signal, scales, overlap):
             s,
             int(s * (1 - overlap)),
             s,
-            # torch.hann_window(s).to(signal),
             torch.hann_window(s, device=signal.device, dtype=signal.dtype),
             True,
             normalized=True,
             return_complex=True,
         ).abs()
-        S = S.reshape(*bc, *S.shape[-2:])
+        S = S.reshape(*bc, *S.shape[-2:]) # B x C x F x T
         stfts.append(S)
     return stfts
 

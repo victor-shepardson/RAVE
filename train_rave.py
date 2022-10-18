@@ -24,9 +24,11 @@ if __name__ == "__main__":
         # number of channels in PQMF filter
         DATA_SIZE = 16
         # hidden layer width for the encoder and generator
-        # if CAPACITY == DATA_SIZE, data dimension is preserved throughout
-        # (except for the latent bottleneck)
+        # if CAPACITY == DATA_SIZE, data dimension is preserved throughout,
+        # modulo effect of NARROW and LATENT_SIZE
         CAPACITY = setting(default=32, small=16, large=32)
+        # extra inner width in resblocks
+        BOOM = 2
         # number of latent dimensions before pruning
         LATENT_SIZE = 128
         # passed directly to conv layers apparently
@@ -46,6 +48,12 @@ if __name__ == "__main__":
             default=[4, 4, 4, 2],
             small=[4, 4, 4, 2],
             large=[4, 4, 2, 2, 2],
+        )
+        # reduction in data dim in encoder / increase (reversed) in generator
+        NARROW = setting(
+            default=[2, 2, 2, 1],
+            small=[2, 2, 2, 1],
+            large=[2, 2, 2, 1, 1],
         )
         #low and high values for the cyclic beta-VAE objective
         MIN_KL = 1e-1
@@ -148,8 +156,10 @@ if __name__ == "__main__":
     model = RAVE(
         data_size=args.DATA_SIZE,
         capacity=args.CAPACITY,
+        boom=args.BOOM,
         latent_size=args.LATENT_SIZE,
         ratios=args.RATIOS,
+        narrow=args.NARROW,
         bias=args.BIAS,
         encoder_batchnorm=args.ENCODER_BATCHNORM,
         loud_stride=args.LOUD_STRIDE,

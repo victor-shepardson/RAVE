@@ -55,7 +55,8 @@ class ResidualStack(nn.Module):
                  padding_mode,
                  cumulative_delay=0,
                  bias=False,
-                 depth=3):
+                 depth=3,
+                 boom=2):
         super().__init__()
         net = []
 
@@ -68,7 +69,7 @@ class ResidualStack(nn.Module):
                 wn(
                     cc.Conv1d(
                         dim,
-                        dim*2,
+                        dim*boom,
                         kernel_size,
                         padding=cc.get_padding(
                             kernel_size,
@@ -84,7 +85,7 @@ class ResidualStack(nn.Module):
             seq.append(
                 wn(
                     cc.Conv1d(
-                        dim*2,
+                        dim*boom,
                         dim,
                         1,
                         # padding=cc.get_padding(kernel_size, mode=padding_mode),
@@ -190,8 +191,10 @@ class Generator(nn.Module):
     def __init__(self,
                  latent_size,
                  capacity,
+                 boom,
                  data_size,
                  ratios,
+                 narrow,
                  loud_stride,
                  noise_ratios,
                  noise_bands,
@@ -199,7 +202,7 @@ class Generator(nn.Module):
                  bias=False):
         super().__init__()
 
-        out_dim = np.prod(ratios) * capacity
+        out_dim = int(np.prod(ratios) * capacity // np.prod(narrow))
 
         net = [
             wn(
@@ -214,9 +217,9 @@ class Generator(nn.Module):
 
         net.append(nn.LeakyReLU(0.2))
 
-        for i, r in enumerate(ratios):
+        for i,(r, n) in enumerate(zip(ratios, narrow)):
             in_dim = out_dim
-            out_dim = out_dim//r
+            out_dim = out_dim * n // r
 
             net.append(
                 UpsampleLayer(
@@ -232,6 +235,7 @@ class Generator(nn.Module):
                     3,
                     padding_mode,
                     cumulative_delay=net[-1].cumulative_delay,
+                    boom=boom
                 ))
 
         self.net = cc.CachedSequential(*net)
@@ -303,8 +307,10 @@ class Encoder(nn.Module):
     def __init__(self,
                  data_size,
                  capacity,
+                 boom,
                  latent_size,
                  ratios,
+                 narrow,
                  padding_mode,
                  use_bn,
                  bias=False):
@@ -324,9 +330,9 @@ class Encoder(nn.Module):
                 bias=bias))
             ]
 
-        for i, r in enumerate(ratios):
+        for r, n in zip(ratios, narrow):
             in_dim = out_dim
-            out_dim = out_dim * r
+            out_dim = out_dim * r // n
 
             if use_bn:
                 net.append(nn.BatchNorm1d(in_dim))
@@ -336,7 +342,8 @@ class Encoder(nn.Module):
                     3,
                     padding_mode,
                     cumulative_delay=net[-2 if use_bn else -1].cumulative_delay,
-                    depth=1
+                    depth=1,
+                    boom=boom
                 ))
             net.append(maybe_wn(
                 cc.Conv1d(
@@ -364,11 +371,12 @@ class Encoder(nn.Module):
         self.net = cc.CachedSequential(*net)
         self.cumulative_delay = self.net.cumulative_delay
 
-    def forward(self, x, double=False):
+    def forward(self, x, double:bool=False):
         z = self.net(x)
         # duplicate along batch dimension
         if double:
-            z = z.repeat(2, *(1,)*(z.ndim-1))
+            # z = z.repeat(2, *(1,)*(z.ndim-1))
+            z = z.repeat(2, 1, 1)
         # split into mean, scale parameters along channel dimension
         return torch.split(z, z.shape[1] // 2, 1)
 
@@ -503,8 +511,10 @@ class RAVE(pl.LightningModule):
     def __init__(self,
                  data_size,
                  capacity,
+                 boom,
                  latent_size,
                  ratios,
+                 narrow,
                  bias,
                  encoder_batchnorm,
                  loud_stride,
@@ -551,8 +561,10 @@ class RAVE(pl.LightningModule):
         self.encoder = Encoder(
             data_size,
             capacity,
+            boom,
             encoder_out_size,
             ratios,
+            narrow,
             "causal" if no_latency else "centered",
             encoder_batchnorm,
             bias,
@@ -560,8 +572,10 @@ class RAVE(pl.LightningModule):
         self.decoder = Generator(
             latent_size,
             capacity,
+            boom,
             data_size,
             list(reversed(ratios)),
+            list(reversed(narrow)),
             loud_stride,
             noise_ratios,
             noise_bands,

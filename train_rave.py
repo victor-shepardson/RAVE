@@ -80,11 +80,12 @@ if __name__ == "__main__":
         # CAPACITY but for the discriminator
         D_CAPACITY = 16
         # interacts with D_CAPACITY and D_N_LAYERS to set the layer widths, conv groups, and strides in discriminator
-        D_MULTIPLIER = 4
+        # D_MULTIPLIER = 4
         # discriminator depth
-        D_N_LAYERS = 4
+        # D_N_LAYERS = 4
         # stacked discriminator pooling factor
-        D_STACK_FACTOR = 2
+        # D_STACK_FACTOR = 2
+
         # changes the discriminator to operate on (real, fake) vs (fake, fake) 
         # pairs, which has the effect of making it a conditional GAN:
         # it learns whether y is a realistic reconstruction from z,
@@ -167,9 +168,9 @@ if __name__ == "__main__":
         noise_ratios=args.NOISE_RATIOS,
         noise_bands=args.NOISE_BANDS,
         d_capacity=args.D_CAPACITY,
-        d_multiplier=args.D_MULTIPLIER,
-        d_n_layers=args.D_N_LAYERS,
-        d_stack_factor=args.D_STACK_FACTOR,
+        # d_multiplier=args.D_MULTIPLIER,
+        # d_n_layers=args.D_N_LAYERS,
+        # d_stack_factor=args.D_STACK_FACTOR,
         pair_discriminator=args.PAIR_DISCRIMINATOR,
         ged=args.GED,
         adversarial_loss=args.ADVERSARIAL_LOSS,

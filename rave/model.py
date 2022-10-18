@@ -442,69 +442,119 @@ class Encoder(nn.Module):
 #         # split into mean, scale parameters along channel dimension
 #         return torch.split(z, z.shape[1] // 2, 1)
 
-
 class Discriminator(nn.Module):
-    def __init__(self, in_size, capacity, multiplier, n_layers):
+    def __init__(self,
+                data_size,
+                capacity,
+                boom,
+                ratios,
+                narrow,
+                padding_mode="centered"):
         super().__init__()
+        out_dim = capacity
 
-        out_size = capacity
+        self.root = wn(nn.Conv1d(
+            data_size,
+            out_dim,
+            7,
+            ))
 
-        net = [
-            wn(cc.Conv1d(in_size, out_size, 15, padding=cc.get_padding(15)))
-        ]
-        net.append(nn.LeakyReLU(.2))
+        self.stem = nn.ModuleList()
+        self.heads = nn.ModuleList()
 
-        for i in range(n_layers):
-            in_size = out_size
-            out_size = min(1024, in_size*multiplier)
+        for r, n in zip(ratios, narrow):
+            in_dim = out_dim
+            out_dim = out_dim * r // n
 
-            net.append(
-                wn(
-                    cc.Conv1d(
-                        in_size,
-                        out_size,
-                        41,
-                        stride=multiplier,
-                        padding=cc.get_padding(41, multiplier),
-                        groups=out_size//capacity
-                    )))
-            net.append(nn.LeakyReLU(.2))
+            self.stem.append(nn.Sequential(
+                ResidualStack(
+                    in_dim,
+                    3,
+                    padding_mode=padding_mode,
+                    depth=3,
+                    boom=boom
+                ),
+                wn(nn.Conv1d(
+                    in_dim,
+                    out_dim,
+                    2 * r + 1,
+                    stride=r,
+                )) # no padding needed here for discriminator
+            ))
 
-        net.append(
-            wn(
-                cc.Conv1d(
-                    out_size,
-                    out_size,
-                    5,
-                    padding=cc.get_padding(5),
-                )))
-        net.append(nn.LeakyReLU(.2))
-        net.append(
-            wn(cc.Conv1d(out_size, 1, 1)))
-        self.net = nn.ModuleList(net)
+            self.heads.append(nn.Conv1d(out_dim, 1, 3))
 
     def forward(self, x):
-        feature = []
-        for layer in self.net:
+        scores = []
+        x = self.root(x)
+        for layer, head in zip(self.stem, self.heads):
             x = layer(x)
-            if isinstance(layer, nn.Conv1d):
-                feature.append(x)
-        return feature
+            scores.append(head(x))
+        return scores
 
 
-class StackDiscriminators(nn.Module):
-    def __init__(self, n_dis, *args, factor=2, **kwargs):
-        super().__init__()
-        self.factor = factor
-        self.discriminators = nn.ModuleList(
-            [Discriminator(*args, **kwargs) for i in range(n_dis)], )
+# class Discriminator(nn.Module):
+#     def __init__(self, in_size, capacity, multiplier, n_layers):
+#         super().__init__()
 
-    def forward(self, x):
-        features = []
-        for layer in self.discriminators:
-            features.append(layer(x))
-            x = nn.functional.avg_pool1d(x, self.factor)
-        return features
+#         out_size = capacity
+
+#         net = [
+#             wn(cc.Conv1d(in_size, out_size, 15, padding=cc.get_padding(15)))
+#         ]
+#         net.append(nn.LeakyReLU(.2))
+
+#         for i in range(n_layers):
+#             in_size = out_size
+#             out_size = min(1024, in_size*multiplier)
+
+#             net.append(
+#                 wn(
+#                     cc.Conv1d(
+#                         in_size,
+#                         out_size,
+#                         41,
+#                         stride=multiplier,
+#                         padding=cc.get_padding(41, multiplier),
+#                         groups=out_size//capacity
+#                     )))
+#             net.append(nn.LeakyReLU(.2))
+
+#         net.append(
+#             wn(
+#                 cc.Conv1d(
+#                     out_size,
+#                     out_size,
+#                     5,
+#                     padding=cc.get_padding(5),
+#                 )))
+#         net.append(nn.LeakyReLU(.2))
+#         net.append(
+#             wn(cc.Conv1d(out_size, 1, 1)))
+#         self.net = nn.ModuleList(net)
+
+#     def forward(self, x):
+#         feature = []
+#         for layer in self.net:
+#             x = layer(x)
+#             if isinstance(layer, nn.Conv1d):
+#                 feature.append(x)
+#         return feature
+
+
+# class StackDiscriminators(nn.Module):
+#     def __init__(self, n_dis, *args, factor=2, **kwargs):
+#         super().__init__()
+#         self.factor = factor
+#         self.discriminators = nn.ModuleList(
+#             [Discriminator(*args, **kwargs) for i in range(n_dis)], )
+
+#     def forward(self, x):
+#         features = []
+#         for layer in self.discriminators:
+#             features.append(layer(x))
+#             x = nn.functional.avg_pool1d(x, self.factor)
+#         return features
 
 
 class RAVE(pl.LightningModule):
@@ -522,9 +572,9 @@ class RAVE(pl.LightningModule):
                  noise_ratios,
                  noise_bands,
                  d_capacity,
-                 d_multiplier,
-                 d_n_layers,
-                 d_stack_factor,
+                #  d_multiplier,
+                #  d_n_layers,
+                #  d_stack_factor,
                  pair_discriminator,
                  ged,
                  adversarial_loss,
@@ -591,13 +641,20 @@ class RAVE(pl.LightningModule):
             print(f'{n}: {p.numel()}')
 
         if adversarial_loss or feature_match:
-            self.discriminator = StackDiscriminators(
-                3, factor=d_stack_factor,
-                in_size=2 if pair_discriminator else 1,
-                capacity=d_capacity,
-                multiplier=d_multiplier,
-                n_layers=d_n_layers
-                )
+            # self.discriminator = StackDiscriminators(
+            #     3, factor=d_stack_factor,
+            #     in_size=2 if pair_discriminator else 1,
+            #     capacity=d_capacity,
+            #     multiplier=d_multiplier,
+            #     n_layers=d_n_layers
+            #     )
+            self.discriminator = Discriminator(
+                data_size,
+                d_capacity,
+                boom,
+                ratios,
+                narrow,
+            )
         else:
             self.discriminator = None
 
@@ -769,6 +826,81 @@ class RAVE(pl.LightningModule):
         distance = self.distance(target, y, y2 if use_ged else None)
         p.tick("mb distance")
 
+        feature_matching_distance = 0.
+        if use_discriminator:  # DISCRIMINATION
+            # note -- could run x and target both through discriminator here
+            # shouldn't matter which one is used (?)
+            if use_pairs and not use_ged:
+                real = torch.cat((target, y), -2)
+                fake = torch.cat((y2, y), -2)
+                to_disc = torch.cat((real, fake))
+            if use_pairs and use_ged:
+                real = torch.cat((target, y), -2)
+                fake = torch.cat((y2, y), -2)
+                fake2 = torch.cat((y, y2), -2)
+                to_disc = torch.cat((real, fake, fake2))
+            if not use_pairs and use_ged:
+                to_disc = torch.cat((target, y, y2))
+            if not use_pairs and not use_ged:
+                to_disc = torch.cat((target, y))
+            # discs_features = self.discriminator(to_disc)
+            scores = self.discriminator(to_disc)
+
+            p.tick("discriminator")
+
+            # all but final layer in each parallel discriminator
+            # sum is doing list concatenation here
+            # feature_maps = sum([d[:-1] for d in discs_features], start=[])
+            # final layers
+            # scores = [d[-1] for d in discs_features]
+
+            loss_dis = 0
+            loss_adv = 0
+            pred_true = 0
+            pred_fake = 0
+
+            # loop over parallel discriminators at 3 scales 1, 1/2, 1/4
+            for s in scores:
+                if use_ged:
+                    real, fake = s.split((s.shape[0]//3, s.shape[0]*2//3))
+                else:
+                    real, fake = s.chunk(2)
+                _dis, _adv = self.adversarial_combine(real, fake, mode=self.mode)
+                loss_dis = loss_dis + _dis
+                loss_adv = loss_adv + _adv
+                pred_true = pred_true + real.mean()
+                pred_fake = pred_fake + fake.mean()
+
+            p.tick("adversarial loss")
+
+            if self.feature_match:
+                raise NotImplementedError("""
+                    this branch uses multi-head discriminator instead of feature matching
+                    """)
+                # if use_ged:
+                #     def dist(fm):
+                #         real, fake, fake2 = fm.chunk(3)
+                #         return (
+                #             (real-fake).abs().mean()
+                #             + (real-fake2).abs().mean()
+                #             - (fake-fake2).abs().mean()
+                #         )
+                # else:
+                #     def dist(fm):
+                #         real, fake = fm.chunk(2)
+                #         return (real-fake).abs().mean()
+                # feature_matching_distance = 10*sum(
+                #     map(dist, feature_maps)) / len(feature_maps)
+                # p.tick("feature matching distance")
+
+        else:
+            pred_true = x.new_zeros(1)
+            pred_fake = x.new_zeros(1)
+            loss_dis = x.new_zeros(1)
+            loss_adv = x.new_zeros(1)
+
+
+
         if self.pqmf is not None:  # FULL BAND RECOMPOSITION
             # why run inverse pqmf on x instead of
             # saving original audio?
@@ -792,70 +924,6 @@ class RAVE(pl.LightningModule):
 
         distance = distance + loud_dist
         p.tick("loudness distance")
-
-        feature_matching_distance = 0.
-        if use_discriminator:  # DISCRIMINATION
-            # note -- could run x and target both through discriminator here
-            # shouldn't matter which one is used (?)
-            if use_pairs and not use_ged:
-                real = torch.cat((target, y), -2)
-                fake = torch.cat((y2, y), -2)
-                to_disc = torch.cat((real, fake))
-            if use_pairs and use_ged:
-                real = torch.cat((target, y), -2)
-                fake = torch.cat((y2, y), -2)
-                fake2 = torch.cat((y, y2), -2)
-                to_disc = torch.cat((real, fake, fake2))
-            if not use_pairs and use_ged:
-                to_disc = torch.cat((target, y, y2))
-            if not use_pairs and not use_ged:
-                to_disc = torch.cat((target, y))
-            discs_features = self.discriminator(to_disc)
-
-            # all but final layer in each parallel discriminator
-            # sum is doing list concatenation here
-            feature_maps = sum([d[:-1] for d in discs_features], start=[])
-            # final layers
-            scores = [d[-1] for d in discs_features]
-
-            loss_dis = 0
-            loss_adv = 0
-            pred_true = 0
-            pred_fake = 0
-
-            # loop over parallel discriminators at 3 scales 1, 1/2, 1/4
-            for s in scores:
-                if use_ged:
-                    real, fake = s.split((s.shape[0]//3, s.shape[0]*2//3))
-                else:
-                    real, fake = s.chunk(2)
-                _dis, _adv = self.adversarial_combine(real, fake, mode=self.mode)
-                loss_dis = loss_dis + _dis
-                loss_adv = loss_adv + _adv
-                pred_true = pred_true + real.mean()
-                pred_fake = pred_fake + fake.mean()
-
-            if self.feature_match:
-                if use_ged:
-                    def dist(fm):
-                        real, fake, fake2 = fm.chunk(3)
-                        return (
-                            (real-fake).abs().mean()
-                            + (real-fake2).abs().mean()
-                            - (fake-fake2).abs().mean()
-                        )
-                else:
-                    def dist(fm):
-                        real, fake = fm.chunk(2)
-                        return (real-fake).abs().mean()
-                feature_matching_distance = 10*sum(
-                    map(dist, feature_maps)) / len(feature_maps)
-
-        else:
-            pred_true = x.new_zeros(1)
-            pred_fake = x.new_zeros(1)
-            loss_dis = x.new_zeros(1)
-            loss_adv = x.new_zeros(1)
 
         # COMPOSE GEN LOSS
         # beta = get_beta_kl_cyclic_annealed(

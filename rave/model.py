@@ -384,7 +384,12 @@ class Encoder(nn.Module):
             # z = z.repeat(2, *(1,)*(z.ndim-1))
             z = z.repeat(2, 1, 1)
         # split into mean, scale parameters along channel dimension
-        return torch.split(z, z.shape[1] // 2, 1)
+        # if use_scale:
+            # return torch.split(z, z.shape[1] // 2, 1)
+            # return z.chunk(2, 1)
+        # else:
+            # return z, None
+        return z
 
 # class Encoder(nn.Module):
 #     def __init__(self,
@@ -695,31 +700,37 @@ class RAVE(pl.LightningModule):
 
     def reparametrize(self, mean, scale):
 
-        if self.hparams['sample_kl']:
-            log_std = scale.clamp(-50, 3)
-            u = torch.randn_like(mean)
-            z = u * log_std.exp() + mean
-            if self.hparams['path_derivative']:
-                log_std = log_std.detach()
-                mean = mean.detach()
-                _u = (z - mean) / log_std.exp()
-                kl = (0.5*(z*z - _u*_u) - log_std).mean((0, 2))
-            else:
-                kl = (0.5*(z*z - u*u) - log_std).mean((0, 2))
-        else:
-            std = nn.functional.softplus(scale) + 1e-4
-            var = std * std
-            logvar = torch.log(var)
-            z = torch.randn_like(mean) * std + mean
-            kl = 0.5 * (mean * mean + var - logvar - 1).mean((0, 2))
-
-        if self.cropped_latent_size:
+        if self.cropped_latent_size > 0:
             noise = torch.randn(
-                z.shape[0],
+                mean.shape[0],
                 self.latent_size - self.cropped_latent_size,
-                z.shape[-1],
-            ).to(z.device)
-            z = torch.cat([z, noise], 1)
+                mean.shape[-1],
+            ).to(mean.device)
+            z = torch.cat([mean, noise], 1)
+            kl = None
+        else:
+            if scale is None:
+                raise ValueError("""
+                    in `reparametrize`:
+                    `scale` should not be None while `self.cropped_latent_size` is 0
+                """)
+            if self.hparams['sample_kl']:
+                log_std = scale.clamp(-50, 3)
+                u = torch.randn_like(mean)
+                z = u * log_std.exp() + mean
+                if self.hparams['path_derivative']:
+                    log_std = log_std.detach()
+                    mean = mean.detach()
+                    _u = (z - mean) / log_std.exp()
+                    kl = (0.5*(z*z - _u*_u) - log_std).mean((0, 2))
+                else:
+                    kl = (0.5*(z*z - u*u) - log_std).mean((0, 2))
+            else:
+                std = nn.functional.softplus(scale) + 1e-4
+                var = std * std
+                logvar = torch.log(var)
+                z = torch.randn_like(mean) * std + mean
+                kl = 0.5 * (mean * mean + var - logvar - 1).mean((0, 2))
 
         return z, kl
 
@@ -764,10 +775,10 @@ class RAVE(pl.LightningModule):
         if freeze_encoder:
             self.encoder.eval()
             with torch.no_grad():
-                z, kl = self.reparametrize(*self.encoder(x, double=double_z))
+                z, kl = self.reparametrize(*self.split_params(self.encoder(x, double=double_z)))
         else:
-            z, kl = self.reparametrize(*self.encoder(x, double=double_z))
-        kl = kl.sum()
+            z, kl = self.reparametrize(*self.split_params(self.encoder(x, double=double_z)))
+        kl = kl.sum() if kl is not None else 0
 
         # DECODE LATENT
         y = self.decoder(z, add_noise=self.hparams['use_noise'])
@@ -955,12 +966,18 @@ class RAVE(pl.LightningModule):
 
         # print(p)
 
+    def split_params(self, p):
+        if self.cropped_latent_size > 0:
+            return p, None
+        return p.chunk(2,1)
+
     def encode(self, x):
         if self.pqmf is not None:
             x = self.pqmf(x)
 
-        mean, scale = self.encoder(x)
-        z, _ = self.reparametrize(mean, scale)
+        params = self.encoder(x)
+
+        z, _ = self.reparametrize(*self.split_params(params))
         return z
 
     def decode(self, z):
@@ -978,7 +995,7 @@ class RAVE(pl.LightningModule):
             x = self.pqmf(x)
             target = self.pqmf(target)
 
-        mean, scale = self.encoder(x)
+        mean, scale = self.split_params(self.encoder(x))
 
         if loader_idx > 0:
             # z = mean
@@ -1030,26 +1047,37 @@ class RAVE(pl.LightningModule):
     def crop_latent_space(self, n):
         # TODO: deal with weight norm
         # with PCA:
-        # project and prune the final encoder layer
+        # project and prune the final encoder layers
         pca = self.latent_pca[:n]
         # w: (out, in, kernel)
         # b: (out)
         layer_in = self.encoder.net[-1]
+        layer_prev = self.encoder.net[-3]
+        nn.utils.remove_weight_norm(layer_in)
+        nn.utils.remove_weight_norm(layer_prev)
         W, b = layer_in.weight, layer_in.bias
+        Wp, bp = layer_prev.weight, layer_prev.bias
         # remove the scale parameters
         W, _ = W.chunk(2, 0)
         b, _ = b.chunk(2, 0)
+        Wp, _ = Wp.chunk(2, 0)
+        bp, _ = bp.chunk(2, 0)
         # U(WX + b - c) = (UW)X + U(b - c)
         # (out',out) @ (k,out,in) -> (k, out', in)
         W = (pca @ W.permute(2,0,1)).permute(1,2,0)
         b = pca @ (b - self.latent_mean)
         # assign back
         layer_in.weight, layer_in.bias = nn.Parameter(W), nn.Parameter(b)
+        layer_in.in_channels = layer_in.in_channels//2
         layer_in.out_channels = n
         layer_in.groups = 1
+        layer_prev.weight, layer_prev.bias = nn.Parameter(Wp), nn.Parameter(bp)
+        layer_prev.out_channels = layer_prev.out_channels//2
 
         # project the first decoder layer
         layer_out = self.decoder.net[0]
+        nn.utils.remove_weight_norm(layer_out)
+
         # W(UX + c) + b = (WU)X + (Wc + b)
         # (k, out, in) @ (in,in') -> (k, out, in')
         W, b = layer_out.weight, layer_out.bias

@@ -312,10 +312,10 @@ class Encoder(nn.Module):
                  ratios,
                  narrow,
                  padding_mode,
-                 use_bn,
+                 norm=None,
                  bias=False):
         super().__init__()
-        maybe_wn = (lambda x:x) if use_bn else wn
+        maybe_wn = (lambda x:x) if norm=='batch' else wn
 
         out_dim = capacity
 
@@ -330,18 +330,24 @@ class Encoder(nn.Module):
                 bias=bias))
             ]
 
+        if norm=='batch':
+            norm = lambda d: nn.BatchNorm1d(d)
+        elif norm=='instance':
+            norm = lambda d: nn.InstanceNorm1d(d)
+
+
         for r, n in zip(ratios, narrow):
             in_dim = out_dim
             out_dim = out_dim * r // n
 
-            if use_bn:
-                net.append(nn.BatchNorm1d(in_dim))
+            if norm is not None:
+                net.append(norm(in_dim))
             net.append(
                 ResidualStack(
                     in_dim,
                     3,
                     padding_mode,
-                    cumulative_delay=net[-2 if use_bn else -1].cumulative_delay,
+                    cumulative_delay=net[-2 if norm is not None else -1].cumulative_delay,
                     depth=1,
                     boom=boom
                 ))
@@ -576,7 +582,7 @@ class RAVE(pl.LightningModule):
                  ratios,
                  narrow,
                  bias,
-                 encoder_batchnorm,
+                 encoder_norm,
                  loud_stride,
                  use_noise,
                  noise_ratios,
@@ -626,7 +632,7 @@ class RAVE(pl.LightningModule):
             ratios,
             narrow,
             "causal" if no_latency else "centered",
-            encoder_batchnorm,
+            encoder_norm,
             bias,
         )
         self.decoder = Generator(

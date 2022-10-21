@@ -37,10 +37,10 @@ if __name__ == "__main__":
         # not sure why you would set this though since there is no option to
         # change the norm layers (except in the encoder, below)
         BIAS = True
-        # if False, replace BatchNorm Layers in the encoder with weight norm as
-        # in all other parts of the network;
-        # this seems to fix the bad validation performance
-        ENCODER_BATCHNORM = True
+        # None for weight norm only,
+        # 'batch' for batch norm only (original version),
+        # 'instance' for weight+instance norm
+        ENCODER_NORM = None
         # enables causal convolutions, also lowers quality of PQMF, which reduces latency of the inverse filter (?)
         NO_LATENCY = False
         # stride/upsample factor between blocks in the encoder and generator. also determines depth of encoder/generator
@@ -162,7 +162,7 @@ if __name__ == "__main__":
         ratios=args.RATIOS,
         narrow=args.NARROW,
         bias=args.BIAS,
-        encoder_batchnorm=args.ENCODER_BATCHNORM,
+        encoder_norm=args.ENCODER_NORM,
         loud_stride=args.LOUD_STRIDE,
         use_noise=args.USE_NOISE,
         noise_ratios=args.NOISE_RATIOS,

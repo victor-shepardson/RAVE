@@ -442,6 +442,11 @@ class Encoder(nn.Module):
 #         # split into mean, scale parameters along channel dimension
 #         return torch.split(z, z.shape[1] // 2, 1)
 
+class GLU(nn.Module):
+    def forward(self, x):
+        a, b = x.chunk(2, 1)
+        return a.sigmoid() * b
+
 class Discriminator(nn.Module):
     def __init__(self,
                 data_size,
@@ -482,7 +487,12 @@ class Discriminator(nn.Module):
                 )) # no padding needed here for discriminator
             ))
 
-            self.heads.append(nn.Conv1d(out_dim, 1, 3))
+            # self.heads.append(nn.Conv1d(out_dim, 1, 3))
+            self.heads.append(nn.Sequential(
+                nn.Conv1d(out_dim, out_dim*2, 1, groups=2),
+                GLU(),
+                nn.Conv1d(out_dim, 1, 3)
+            ))
 
     def forward(self, x):
         scores = []

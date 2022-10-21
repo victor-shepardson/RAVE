@@ -24,7 +24,7 @@ class args(Config):
     # should be true for realtime
     CACHED = True
     # number of latents to preserve from RAVE model
-    LATENT_SIZE = 8
+    LATENT_SIZE = None
     # predictive context
     CONTEXT = 3
     # number of loops
@@ -51,20 +51,29 @@ class LivingLooper(nn.Module):
     record_index:int
     n_memory:int
     loop_length:int
+    trained_cropped:bool
 
     has_model:List[bool]
 
     def __init__(self, 
             rave_model:RAVE, 
             n_loops:int, n_context:int, n_memory:int, 
-            n_latent:int
+            n_latent:Optional[int] = None
             ):
         super().__init__()
 
         self.n_loops = n_loops
         self.n_context = n_context
-        self.n_latent = n_latent#rave_model.cropped_latent_size
         self.n_memory = n_memory
+
+        if n_latent is not None:
+            rave_model.crop_latent_space(n_latent)
+
+        self.trained_cropped = bool(rave_model.cropped_latent_size)
+        self.n_latent = (
+            rave_model.cropped_latent_size 
+            if self.trained_cropped 
+            else rave_model.latent_size)
 
         self.n_feature = self.n_loops * self.n_context * self.n_latent
 
@@ -197,13 +206,20 @@ class LivingLooper(nn.Module):
         if self.pqmf is not None:
             x = self.pqmf(x)
 
-        z, _ = self.encoder(x)
+        z = self.encoder(x)[:,:self.n_latent]
+        # if self.trained_cropped:
+        #     z = p
+        # else:
+        #     # z, _ = self.encoder(x).chunk(2, 1)
+        #     z, _ = p.chunk(2, 1)
+
+        # z, _ = self.encoder(x)
         # z, std = self.post_process_distribution(mean, scale)
 
         # z = z - self.latent_mean.unsqueeze(-1)
         # z = nn.functional.conv1d(z, self.latent_pca.unsqueeze(-1))
 
-        z = z[:, :self.n_latent]
+        # z = z[:, :self.n_latent]
         return z
 
     def decode(self, z):
@@ -301,7 +317,7 @@ x = torch.zeros(1, 1, 2**14)
 if model.pqmf is not None:
     x = model.pqmf(x)
 
-z, _ = model.reparametrize(*model.encoder(x))
+z, _ = model.reparametrize(*model.split_params(model.encoder(x)))
 
 y = model.decoder(z)
 
@@ -324,7 +340,8 @@ assert int(args.SR) == sr, f"model sample rate is {sr}"
 # resample.to_target_sampling_rate(resample.from_target_sampling_rate(x))
 
 logging.info("creating looper")
-looper = LivingLooper(model, args.LOOPS, args.CONTEXT, args.MEMORY, args.LATENT_SIZE)
+ls = None if args.LATENT_SIZE is None else int(args.LATENT_SIZE)
+looper = LivingLooper(model, args.LOOPS, args.CONTEXT, args.MEMORY, ls)
 # smoke test
 def feed(i):
     x = torch.randn(1, 1, 2**11)

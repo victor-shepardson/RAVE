@@ -377,6 +377,16 @@ class Encoder(nn.Module):
         self.net = cc.CachedSequential(*net)
         self.cumulative_delay = self.net.cumulative_delay
 
+    # def get_last_layer(self, in_size, latent_size, cucropped=False):
+    #     return cc.Conv1d(in_size, 
+    #         latent_size if cropped else latent_size*2,
+    #         3,
+    #         padding=cc.get_padding(3, mode=self.padding_mode),
+    #         groups=1 if cropped else 2,
+    #         bias=self.use_bias,
+    #         cumulative_delay=net[-2].cumulative_delay,
+    #     )
+
     def forward(self, x, double:bool=False):
         z = self.net(x)
         # duplicate along batch dimension
@@ -527,7 +537,6 @@ class RAVE(pl.LightningModule):
                  ratios,
                  narrow,
                  bias,
-                 encoder_norm,
                  loud_stride,
                  use_noise,
                  noise_ratios,
@@ -543,6 +552,7 @@ class RAVE(pl.LightningModule):
                  warmup,
                 #  kl_cycle,
                  mode,
+                 encoder_norm=None,
                  no_latency=False,
                  min_kl=1e-4,
                  max_kl=5e-1,
@@ -1053,8 +1063,10 @@ class RAVE(pl.LightningModule):
         # b: (out)
         layer_in = self.encoder.net[-1]
         layer_prev = self.encoder.net[-3]
-        nn.utils.remove_weight_norm(layer_in)
-        nn.utils.remove_weight_norm(layer_prev)
+        if hasattr(layer_in, "weight_g"):
+            nn.utils.remove_weight_norm(layer_in)
+        if hasattr(layer_prev, "weight_g"):
+            nn.utils.remove_weight_norm(layer_prev)
         W, b = layer_in.weight, layer_in.bias
         Wp, bp = layer_prev.weight, layer_prev.bias
         # remove the scale parameters
@@ -1076,7 +1088,8 @@ class RAVE(pl.LightningModule):
 
         # project the first decoder layer
         layer_out = self.decoder.net[0]
-        nn.utils.remove_weight_norm(layer_out)
+        if hasattr(layer_prev, "weight_g"):
+            nn.utils.remove_weight_norm(layer_prev)
 
         # W(UX + c) + b = (WU)X + (Wc + b)
         # (k, out, in) @ (in,in') -> (k, out, in')
@@ -1088,6 +1101,10 @@ class RAVE(pl.LightningModule):
 
         self.cropped_latent_size = n
 
+        # CachedConv stuff
+        layer_in.cache.initialized = False
+        layer_prev.cache.initialized = False
+        layer_out.initialized = False
 
         # # without PCA:
         # # find the n most important latent dimensions

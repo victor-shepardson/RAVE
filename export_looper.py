@@ -252,7 +252,7 @@ class LivingLooper(nn.Module):
         return x
 
     def feat_process(self, i:int, x):
-        return (x - self.center[i]).tanh()
+        return ((x - self.center[i])/2).tanh()
 
     def fit_loop(self, i:int, x, y):
         """
@@ -266,6 +266,7 @@ class LivingLooper(nn.Module):
         x = x.view(x.shape[0], -1)
         y = y.view(y.shape[0], -1)
         
+        y = y.abs().pow(2) * y.sign()
         # y = y.pow(3)
 
         c = x.mean(0)
@@ -293,6 +294,7 @@ class LivingLooper(nn.Module):
             y: Tensor[batch, target]
         """
         y = self.feat_process(i, x) @ self.weights[i] + self.bias[i]
+        y = y.abs().pow(1/2) * y.sign()
         # y = y.abs().pow(1/3) * y.sign()
         return y
 
@@ -344,7 +346,7 @@ ls = None if args.LATENT_SIZE is None else int(args.LATENT_SIZE)
 looper = LivingLooper(model, args.LOOPS, args.CONTEXT, args.MEMORY, ls)
 # smoke test
 def feed(i):
-    x = torch.randn(1, 1, 2**11)
+    x = torch.zeros(1, 1, 2**11)
     looper(i, x)
 
 def smoke_test():

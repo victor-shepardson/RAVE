@@ -113,12 +113,12 @@ class TraceModel(nn.Module):
 
     def reparametrize(self, mean, std):
         var = std * std
-        logvar = torch.log(var)
+        # logvar = torch.log(var)
 
         z = torch.randn_like(mean) * std + mean
-        kl = (mean * mean + var - logvar - 1).sum(1).mean()
+        # kl = (mean * mean + var - logvar - 1).sum(1).mean()
 
-        return z, kl
+        return z#, kl
 
     @torch.jit.export
     def encode(self, x):
@@ -133,7 +133,7 @@ class TraceModel(nn.Module):
         if self.deterministic:
             z = mean
         else:
-            z = self.reparametrize(mean, std)[0]
+            z = self.reparametrize(mean, std)#[0]
 
         z = z - self.latent_mean.unsqueeze(-1)
         z = nn.functional.conv1d(z, self.latent_pca.unsqueeze(-1))
@@ -227,7 +227,8 @@ x = torch.zeros(1, 1, 2**14)
 if model.pqmf is not None:
     x = model.pqmf(x)
 
-z, _ = model.reparametrize(*model.encoder(x))
+# z, _ = model.reparametrize(*model.encoder(x))
+z = model.reparametrize(*model.encoder(x))
 
 if args.STEREO:
     z = z.expand(2, *z.shape[1:])

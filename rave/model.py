@@ -613,6 +613,11 @@ class RAVE(pl.LightningModule):
         self.register_buffer("latent_mean", torch.zeros(encoder_out_size))
         self.register_buffer("fidelity", torch.zeros(encoder_out_size))
 
+        # this will track the most informative dimensions of latent space
+        # by KLD, in descending order, computed at each validation step
+        self.register_buffer("kld_idxs", 
+            torch.zeros(latent_size, dtype=torch.long))
+
         self.latent_size = latent_size
 
         # tell lightning we are doing manual optimization
@@ -691,22 +696,22 @@ class RAVE(pl.LightningModule):
     def reparametrize(self, mean, scale):
 
         if self.hparams['sample_kl']:
-            log_std = scale.clamp(-7, 7)
+            log_std = scale.clamp(-50, 3)
             u = torch.randn_like(mean)
             z = u * log_std.exp() + mean
             if self.hparams['path_derivative']:
                 log_std = log_std.detach()
                 mean = mean.detach()
                 _u = (z - mean) / log_std.exp()
-                kl = (0.5*(z*z - _u*_u) - log_std).sum(1).mean()
+                kl = (0.5*(z*z - _u*_u) - log_std).mean((0, 2))
             else:
-                kl = (0.5*(z*z - u*u) - log_std).sum(1).mean()
+                kl = (0.5*(z*z - u*u) - log_std).mean((0, 2))
         else:
             std = nn.functional.softplus(scale) + 1e-4
             var = std * std
             logvar = torch.log(var)
             z = torch.randn_like(mean) * std + mean
-            kl = 0.5 * (mean * mean + var - logvar - 1).sum(1).mean()
+            kl = 0.5 * (mean * mean + var - logvar - 1).mean((0, 2))
 
         if self.cropped_latent_size:
             noise = torch.randn(
@@ -715,6 +720,7 @@ class RAVE(pl.LightningModule):
                 z.shape[-1],
             ).to(z.device)
             z = torch.cat([z, noise], 1)
+
         return z, kl
 
     def adversarial_combine(self, score_real, score_fake, mode="hinge"):
@@ -732,7 +738,7 @@ class RAVE(pl.LightningModule):
             loss_gen = -torch.log(score_fake).mean()
         else:
             raise NotImplementedError
-        return loss_dis, loss_gen
+        return loss_dis, loss_gen        
 
     def training_step(self, batch, batch_idx):
         p = Profiler()
@@ -761,6 +767,7 @@ class RAVE(pl.LightningModule):
                 z, kl = self.reparametrize(*self.encoder(x, double=double_z))
         else:
             z, kl = self.reparametrize(*self.encoder(x, double=double_z))
+        kl = kl.sum()
 
         # DECODE LATENT
         y = self.decoder(z, add_noise=self.hparams['use_noise'])
@@ -973,38 +980,45 @@ class RAVE(pl.LightningModule):
 
         mean, scale = self.encoder(x)
 
-        if loader_idx>0:
+        if loader_idx > 0:
             # z = mean
             z = torch.cat((
                 mean, 
                 mean + torch.randn((*mean.shape[:2], 1), device=mean.device)/2),
                 0)
+            _, kl = self.reparametrize(mean, scale)
         else:
             z, kl = self.reparametrize(mean, scale)
 
         y = self.decoder(z, add_noise=self.hparams['use_noise'])
         # print(x.shape, z.shape, y.shape)
 
+
         if self.pqmf is not None:
             x = self.pqmf.inverse(x)
             target = self.pqmf.inverse(target)
             y = self.pqmf.inverse(y)
 
+        if loader_idx > 0:
+            y, y2 = y.chunk(2, 0)
+
         distance = self.distance(target, y)
         baseline_distance = self.distance(target, x)
 
-        if loader_idx==0 and self.trainer is not None:
+        if self.trainer is not None:
+            # if loader_idx==0:
             # full-band distance only,
             # in contrast to training distance
             # KLD in bits per second
             self.log("valid_distance", distance)
             self.log("valid_distance/baseline", baseline_distance)
-            self.log("valid_kld_bps", self.npz_to_bps(kl))
+            self.log("valid_kld_bps", self.npz_to_bps(kl.sum()))
+        
 
         if loader_idx==0:
-            return torch.cat([target, y], -1), mean
+            return torch.cat([target, y], -1), mean, kl
         if loader_idx>0:
-            return torch.cat([target, *y.chunk(2, 0)], -1), mean
+            return torch.cat([target, y, y2], -1), mean, None
 
     def npz_to_bps(self, npz):
         """convert nats per z frame to bits per second"""
@@ -1013,10 +1027,63 @@ class RAVE(pl.LightningModule):
             / self.hparams['data_size'] 
             * np.log2(np.e))
 
+    def crop_latent_space(self, n):
+        # TODO: deal with weight norm
+        # with PCA:
+        # project and prune the final encoder layer
+        pca = self.latent_pca[:n]
+        # w: (out, in, kernel)
+        # b: (out)
+        layer_in = self.encoder.net[-1]
+        W, b = layer_in.weight, layer_in.bias
+        # remove the scale parameters
+        W, _ = W.chunk(2, 0)
+        b, _ = b.chunk(2, 0)
+        # U(WX + b - c) = (UW)X + U(b - c)
+        # (out',out) @ (k,out,in) -> (k, out', in)
+        W = (pca @ W.permute(2,0,1)).permute(1,2,0)
+        b = pca @ (b - self.latent_mean)
+        # assign back
+        layer_in.weight, layer_in.bias = nn.Parameter(W), nn.Parameter(b)
+        layer_in.out_channels = n
+        layer_in.groups = 1
+
+        # project the first decoder layer
+        layer_out = self.decoder.net[0]
+        # W(UX + c) + b = (WU)X + (Wc + b)
+        # (k, out, in) @ (in,in') -> (k, out, in')
+        W, b = layer_out.weight, layer_out.bias
+        W = (W.permute(2,0,1) @ self.latent_pca.T).permute(1,2,0)
+        b = W.sum(-1) @ self.latent_mean + b
+        # assign back
+        layer_out.weight, layer_out.bias = nn.Parameter(W), nn.Parameter(b)
+
+        self.cropped_latent_size = n
+
+
+        # # without PCA:
+        # # find the n most important latent dimensions
+        # keep_idxs = self.kld_idxs[:n]
+        # # prune the final encoder layer
+        # # w: (out, in, kernel)
+        # # b: (out)
+        # layer_in = self.encoder.net[-1]
+        # layer_in.weight = layer_in.weight[keep_idxs]
+        # layer_in.bias = layer_in.bias[keep_idxs]
+        # # reorder the first decoder layer
+        # # w: (out, in, kernel)
+        # layer_out = self.decoder.net[0]
+        # layer_out.weight = layer_out.weight[:, self.kld_idxs]
+
+        # # now sorted
+        # self.kld_idxs[:] = range(len(self.kld_idxs))
+        # self.cropped_latent_size = n
+        
+
     def validation_epoch_end(self, outs):
         for (out, tag) in zip(outs, ('valid', 'test')):
 
-            audio, z = list(zip(*out))
+            audio, z, klds = list(zip(*out))
 
             # LATENT SPACE ANALYSIS
             if tag=='valid' and not self.hparams['freeze_encoder']:
@@ -1037,10 +1104,19 @@ class RAVE(pl.LightningModule):
 
                 self.fidelity.copy_(torch.from_numpy(var).to(self.fidelity))
 
-                var_percent = [.8, .9, .95, .99]
-                for p in var_percent:
-                    self.log(f"{p}%_manifold",
+                var_p = [.8, .9, .95, .99]
+                for p in var_p:
+                    self.log(f"{p}_manifold/pca",
                             np.argmax(var > p).astype(np.float32))
+
+                klds = sum(klds) / len(klds)
+                klds, kld_idxs = klds.cpu().sort(descending=True)
+                self.kld_idxs[:] = kld_idxs
+                kld_p = (klds / klds.sum()).cumsum(0)
+                print(kld_p)
+                for p in var_p:
+                    self.log(f"{p}_manifold/kld",
+                            torch.argmax((kld_p > p).long()).item())
 
             n = 32 if tag=='valid' else 8
             y = torch.cat(audio, 0)[:n].reshape(-1)

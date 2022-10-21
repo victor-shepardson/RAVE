@@ -263,7 +263,7 @@ if __name__ == "__main__":
         test = torch.utils.data.Subset(test, torch.randperm(
             len(test), generator=torch.Generator().manual_seed(42))[:args.N_TEST])
 
-    # train = torch.utils.data.Subset(train, range(1600)) ###DEBUG
+    # train = torch.utils.data.Subset(train, range(1600)) ### DEBUG
 
     num_workers = 0 if os.name == "nt" else 8
     train = DataLoader(train, args.BATCH, True, drop_last=True, num_workers=num_workers)
@@ -326,5 +326,8 @@ if __name__ == "__main__":
     if run is not None:
         step = torch.load(run, map_location='cpu')["global_step"]
         trainer.fit_loop.epoch_loop._batches_that_stepped = step #???
+
+    if model.cropped_latent_size > args.CROPPED_LATENT_SIZE:
+        model.crop_latent_space(args.CROPPED_LATENT_SIZE)
 
     trainer.fit(model, train, [val, test], ckpt_path=run)

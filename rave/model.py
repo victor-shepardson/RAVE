@@ -464,11 +464,12 @@ class Discriminator(nn.Module):
         super().__init__()
         out_dim = capacity
 
-        self.root = wn(nn.Conv1d(
-            data_size,
-            out_dim,
-            7,
-            ))
+        self.root = nn.Sequential(
+            wn(nn.Conv1d(data_size, out_dim*2, 7)),
+            nn.LeakyReLU(0.2),
+            nn.InstanceNorm1d(out_dim*2),
+            wn(nn.Conv1d(out_dim*2, out_dim, 1)),
+        )
 
         self.stem = nn.ModuleList()
         self.heads = nn.ModuleList()
@@ -485,6 +486,7 @@ class Discriminator(nn.Module):
                     depth=3,
                     boom=boom
                 ),
+                nn.InstanceNorm1d(in_dim),
                 wn(nn.Conv1d(
                     in_dim,
                     out_dim,
@@ -818,6 +820,7 @@ class RAVE(pl.LightningModule):
         use_pairs = self.hparams['pair_discriminator']
         use_ged = self.hparams['ged']
         use_discriminator = self.hparams['adversarial_loss'] or self.hparams['feature_match']
+        is_disc_step = self.global_step % 2 and use_discriminator
         freeze_encoder = self.hparams['freeze_encoder']
         double_z = use_ged or (use_pairs and use_discriminator)
 
@@ -846,6 +849,8 @@ class RAVE(pl.LightningModule):
         if use_discriminator:  # DISCRIMINATION
             # note -- could run x and target both through discriminator here
             # shouldn't matter which one is used (?)
+            # also -- only y is needed for generator, when not using feature_match
+            # -- probably not worth the ~1/8 time saving right now though
             if use_pairs and not use_ged:
                 real = torch.cat((target, y), -2)
                 fake = torch.cat((y2, y), -2)
@@ -864,18 +869,11 @@ class RAVE(pl.LightningModule):
 
             p.tick("discriminator")
 
-            # all but final layer in each parallel discriminator
-            # sum is doing list concatenation here
-            # feature_maps = sum([d[:-1] for d in discs_features], start=[])
-            # final layers
-            # scores = [d[-1] for d in discs_features]
-
             loss_dis = 0
             loss_adv = 0
             pred_true = 0
             pred_fake = 0
 
-            # loop over parallel discriminators at 3 scales 1, 1/2, 1/4
             for s in scores:
                 if use_ged:
                     real, fake = s.split((s.shape[0]//3, s.shape[0]*2//3))
@@ -961,7 +959,6 @@ class RAVE(pl.LightningModule):
         p.tick("gen loss compose")
 
         # OPTIMIZATION
-        is_disc_step = self.global_step % 2 and use_discriminator
         grad_clip = self.hparams['grad_clip']
 
         if use_discriminator:

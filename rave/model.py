@@ -313,7 +313,8 @@ class Encoder(nn.Module):
                  narrow,
                  padding_mode,
                  norm=None,
-                 bias=False):
+                 bias=False,
+                 ):
         super().__init__()
         maybe_wn = (lambda x:x) if norm=='batch' else wn
 
@@ -335,8 +336,9 @@ class Encoder(nn.Module):
         elif norm=='instance':
             norm = lambda d: nn.InstanceNorm1d(d)
 
+        latent_params = 2 # mean, scale
 
-        for r, n in zip(ratios, narrow):
+        for i,(r, n) in enumerate(zip(ratios, narrow)):
             in_dim = out_dim
             out_dim = out_dim * r // n
 
@@ -354,7 +356,7 @@ class Encoder(nn.Module):
             net.append(maybe_wn(
                 cc.Conv1d(
                     in_dim,
-                    out_dim,
+                    out_dim, 
                     2 * r + 1,
                     padding=cc.get_padding(2 * r + 1, r, mode=padding_mode),
                     stride=r,
@@ -363,30 +365,21 @@ class Encoder(nn.Module):
                 )))
             
         net.append(nn.LeakyReLU(0.2))
+
         net.append(maybe_wn(
             cc.Conv1d(
                 out_dim,
-                2 * latent_size,
+                latent_size * latent_params,
                 3,
                 padding=cc.get_padding(3, mode=padding_mode),
-                groups=2,
+                groups=latent_params,
                 bias=bias,
                 cumulative_delay=net[-2].cumulative_delay,
             )))
 
         self.net = cc.CachedSequential(*net)
         self.cumulative_delay = self.net.cumulative_delay
-
-    # def get_last_layer(self, in_size, latent_size, cucropped=False):
-    #     return cc.Conv1d(in_size, 
-    #         latent_size if cropped else latent_size*2,
-    #         3,
-    #         padding=cc.get_padding(3, mode=self.padding_mode),
-    #         groups=1 if cropped else 2,
-    #         bias=self.use_bias,
-    #         cumulative_delay=net[-2].cumulative_delay,
-    #     )
-
+        
     def forward(self, x, double:bool=False):
         z = self.net(x)
         # duplicate along batch dimension
@@ -577,13 +570,11 @@ class RAVE(pl.LightningModule):
 
         self.loudness = Loudness(sr, 512)
 
-        encoder_out_size = cropped_latent_size if cropped_latent_size else latent_size
-
         self.encoder = Encoder(
             data_size,
             capacity,
             boom,
-            encoder_out_size,
+            latent_size,
             ratios,
             narrow,
             "causal" if no_latency else "centered",
@@ -624,9 +615,9 @@ class RAVE(pl.LightningModule):
 
         self.idx = 0
 
-        self.register_buffer("latent_pca", torch.eye(encoder_out_size))
-        self.register_buffer("latent_mean", torch.zeros(encoder_out_size))
-        self.register_buffer("fidelity", torch.zeros(encoder_out_size))
+        self.register_buffer("latent_pca", torch.eye(latent_size))
+        self.register_buffer("latent_mean", torch.zeros(latent_size))
+        self.register_buffer("fidelity", torch.zeros(latent_size))
 
         # this will track the most informative dimensions of latent space
         # by KLD, in descending order, computed at each validation step
@@ -648,6 +639,9 @@ class RAVE(pl.LightningModule):
         self.feature_match = feature_match
 
         self.register_buffer("saved_step", torch.tensor(0))
+
+        if cropped_latent_size:
+            self.crop_latent_space(cropped_latent_size)
 
     def configure_optimizers(self):
         gen_p = list(self.encoder.parameters())
@@ -711,12 +705,13 @@ class RAVE(pl.LightningModule):
     def reparametrize(self, mean, scale):
 
         if self.cropped_latent_size > 0:
-            noise = torch.randn(
-                mean.shape[0],
-                self.latent_size - self.cropped_latent_size,
-                mean.shape[-1],
-            ).to(mean.device)
-            z = torch.cat([mean, noise], 1)
+            # noise = torch.randn(
+            #     mean.shape[0],
+            #     self.latent_size - self.cropped_latent_size,
+            #     mean.shape[-1],
+            # ).to(mean.device)
+            # z = torch.cat([mean, noise], 1)
+            z = mean
             kl = None
         else:
             if scale is None:
@@ -759,7 +754,21 @@ class RAVE(pl.LightningModule):
             loss_gen = -torch.log(score_fake).mean()
         else:
             raise NotImplementedError
-        return loss_dis, loss_gen        
+        return loss_dis, loss_gen    
+
+    def pad_latent(self, z):
+        if self.cropped_latent_size:
+            # print(f"""
+            # {self.latent_size=}, {self.cropped_latent_size=}, {z.shape=}
+            # """)
+            noise = torch.randn(
+                z.shape[0],
+                self.latent_size - self.cropped_latent_size,
+                z.shape[2],
+                device=z.device,
+            )
+            z = torch.cat([z, noise], 1)    
+        return z
 
     def training_step(self, batch, batch_idx):
         p = Profiler()
@@ -790,6 +799,8 @@ class RAVE(pl.LightningModule):
             z, kl = self.reparametrize(*self.split_params(self.encoder(x, double=double_z)))
         kl = kl.sum() if kl is not None else 0
 
+        z = self.pad_latent(z)
+
         # DECODE LATENT
         y = self.decoder(z, add_noise=self.hparams['use_noise'])
 
@@ -819,7 +830,7 @@ class RAVE(pl.LightningModule):
             loud_dist = (
                 (loud_x - loud_y).pow(2).mean()
                 + (loud_x - loud_y2).pow(2).mean() 
-                - (loud_y2 - loud_y).pow(2).mean())
+                - (loud_y2 - loud_y).pow(2).mean()) 
         else:
             loud_x, loud_y = self.loudness(torch.cat((target,y))).chunk(2)
             loud_dist = (loud_x - loud_y).pow(2).mean()
@@ -1017,6 +1028,8 @@ class RAVE(pl.LightningModule):
         else:
             z, kl = self.reparametrize(mean, scale)
 
+        z = self.pad_latent(z)
+
         y = self.decoder(z, add_noise=self.hparams['use_noise'])
         # print(x.shape, z.shape, y.shape)
 
@@ -1039,7 +1052,8 @@ class RAVE(pl.LightningModule):
             # KLD in bits per second
             self.log("valid_distance", distance)
             self.log("valid_distance/baseline", baseline_distance)
-            self.log("valid_kld_bps", self.npz_to_bps(kl.sum()))
+            if kl is not None:
+                self.log("valid_kld_bps", self.npz_to_bps(kl.sum()))
         
 
         if loader_idx==0:
@@ -1052,10 +1066,9 @@ class RAVE(pl.LightningModule):
         return (npz * self.hparams['sr'] 
             / np.prod(self.hparams['ratios']) 
             / self.hparams['data_size'] 
-            * np.log2(np.e))
+            * np.log2(np.e))      
 
-    def crop_latent_space(self, n):
-        # TODO: deal with weight norm
+    def crop_latent_space(self, n, decoder_latent_size=0):
         # with PCA:
         # project and prune the final encoder layers
         pca = self.latent_pca[:n]
@@ -1088,23 +1101,47 @@ class RAVE(pl.LightningModule):
 
         # project the first decoder layer
         layer_out = self.decoder.net[0]
-        if hasattr(layer_prev, "weight_g"):
-            nn.utils.remove_weight_norm(layer_prev)
+        if hasattr(layer_out, "weight_g"):
+            nn.utils.remove_weight_norm(layer_out)
 
         # W(UX + c) + b = (WU)X + (Wc + b)
         # (k, out, in) @ (in,in') -> (k, out, in')
         W, b = layer_out.weight, layer_out.bias
         W = (W.permute(2,0,1) @ self.latent_pca.T).permute(1,2,0)
         b = W.sum(-1) @ self.latent_mean + b
+
+        # finally, set the number of noise dimensions
+        if decoder_latent_size:
+            if decoder_latent_size < n:
+                raise ValueError("""
+                decoder_latent_size should not be less than cropped size
+                """)
+            if decoder_latent_size > self.latent_size:
+                # expand
+                new_dims = decoder_latent_size-self.latent_size
+                W2 = torch.randn(W.shape[0], new_dims, W.shape[2], device=W.device, dtype=W.dtype)
+                W2 = 0.1 * W2 / W2.norm(dim=(1,2), keepdim=True) * W.norm(dim=(1,2)).mean()
+                W = torch.cat((W, W2), 1)
+            else:
+                # crop
+                W = W[:,:decoder_latent_size]
+
+            self.latent_size = self.hparams['latent_size'] = decoder_latent_size
+
         # assign back
         layer_out.weight, layer_out.bias = nn.Parameter(W), nn.Parameter(b)
+        layer_out.in_channels = self.latent_size
 
-        self.cropped_latent_size = n
+        self.cropped_latent_size = self.hparams['cropped_latent_size'] = n
 
         # CachedConv stuff
-        layer_in.cache.initialized = False
-        layer_prev.cache.initialized = False
-        layer_out.initialized = False
+        for layer in (layer_in, layer_prev, layer_out):
+            if hasattr(layer, 'cache'):
+                layer.cache.initialized = False
+        # if cc.USE_BUFFER_CONV:
+        #     layer_in.cache.initialized = False
+        #     layer_prev.cache.initialized = False
+        #     layer_out.cache.initialized = False
 
         # # without PCA:
         # # find the n most important latent dimensions

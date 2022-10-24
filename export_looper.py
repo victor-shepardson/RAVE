@@ -66,8 +66,8 @@ class LivingLooper(nn.Module):
         self.n_context = n_context
         self.n_memory = n_memory
 
-        if n_latent is not None:
-            rave_model.crop_latent_space(n_latent)
+        # if n_latent is not None:
+            # rave_model.crop_latent_space(n_latent)
 
         self.trained_cropped = bool(rave_model.cropped_latent_size)
         self.n_latent = (
@@ -118,6 +118,10 @@ class LivingLooper(nn.Module):
         Returns:
             Tensor[loop, sample]
         """
+        # return self.decode(self.encode(x)) ### DEBUG
+
+        z = self.encode(x) # always encode for cache, even if result is not used
+
         i = i-1 # convert to zero index loop / negative for no loop
         zs = torch.empty(self.n_loops, self.n_latent)
 
@@ -142,7 +146,7 @@ class LivingLooper(nn.Module):
         if i>=0:
             # print(x.shape)
             # slice on LHS to appease torchscript
-            zs[i:i+1] = self.encode(x)[...,0] # remove time dim
+            zs[i:i+1] = z[...,0] # remove time dim
 
         # predictive context (same for all loops right now)
         feature = self.get_frames(self.n_context) # ctx x loop x latent
@@ -201,33 +205,13 @@ class LivingLooper(nn.Module):
     def encode(self, x):
         """
         """
-        # x = self.resample.from_target_sampling_rate(x)
-
         if self.pqmf is not None:
             x = self.pqmf(x)
 
         z = self.encoder(x)[:,:self.n_latent]
-        # if self.trained_cropped:
-        #     z = p
-        # else:
-        #     # z, _ = self.encoder(x).chunk(2, 1)
-        #     z, _ = p.chunk(2, 1)
-
-        # z, _ = self.encoder(x)
-        # z, std = self.post_process_distribution(mean, scale)
-
-        # z = z - self.latent_mean.unsqueeze(-1)
-        # z = nn.functional.conv1d(z, self.latent_pca.unsqueeze(-1))
-
-        # z = z[:, :self.n_latent]
         return z
 
     def decode(self, z):
-        # if self.trained_cropped:  # PERFORM PCA BEFORE PADDING
-        #     z = nn.functional.conv1d(z, self.latent_pca.T.unsqueeze(-1))
-        #     z = z + self.latent_mean.unsqueeze(-1)
-
-        # CAT WITH SAMPLES FROM PRIOR DISTRIBUTION
         pad_size = self.n_latent_decoder - self.n_latent
         pad_latent = torch.randn(
             z.shape[0],
@@ -238,16 +222,10 @@ class LivingLooper(nn.Module):
 
         z = torch.cat([z, pad_latent], 1)
 
-        # if not self.trained_cropped:  # PERFORM PCA AFTER PADDING
-            # z = nn.functional.conv1d(z, self.latent_pca.T.unsqueeze(-1))
-            # z = z + self.latent_mean.unsqueeze(-1)
-
         x = self.decoder(z)
 
         if self.pqmf is not None:
             x = self.pqmf.inverse(x)
-
-        # x = self.resample.to_target_sampling_rate(x)
 
         return x
 
@@ -300,12 +278,14 @@ class LivingLooper(nn.Module):
 
               
 
-
 logging.info("loading RAVE model from checkpoint")
 
 RUN = search_for_run(args.RUN)
 logging.info(f"using {RUN}")
-model = RAVE.load_from_checkpoint(RUN, strict=False).eval()
+
+debug_kw = {'cropped_latent_size':16, 'latent_size':128} ###DEBUG
+
+model = RAVE.load_from_checkpoint(RUN, **debug_kw, strict=False).eval()
 
 # model.cropped_latent_size = args.LATENT_SIZE # TODO
 
@@ -320,6 +300,7 @@ if model.pqmf is not None:
     x = model.pqmf(x)
 
 z, _ = model.reparametrize(*model.split_params(model.encoder(x)))
+z = model.pad_latent(z)
 
 y = model.decoder(z)
 
@@ -329,6 +310,11 @@ if model.pqmf is not None:
 model.discriminator = None
 
 sr = model.sr
+
+# print(model.encoder.net[-1])
+# print(model.encoder.net[-1].cache)
+# print(model.encoder.net[-1].cache.initialized)
+# print(model.encoder.net[-1].cache.pad.shape)
 
 assert int(args.SR) == sr, f"model sample rate is {sr}"
 # if args.SR is not None:

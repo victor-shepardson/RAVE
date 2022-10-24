@@ -63,8 +63,15 @@ if __name__ == "__main__":
         # use the kld term from http://arxiv.org/abs/1703.09194
         # (SAMPLE_KL must be true)
         PATH_DERIVATIVE = False
-        # this is here for inference I guess? set to 0 for training?
+        # if this is nonzero, crop the latent space before training
+        # this will bake the stored PCA transformation into the encoder and decoder,
+        # making the first CROPPED_LATENT_SIZE latents deterministic,
+        # while making the rest pure noise
         CROPPED_LATENT_SIZE = 0
+        # if nonzero, this will also reduce or expand the number of noise dimensions
+        # when applying CROPPED_LATENT_SIZE
+        TOTAL_LATENT_SIZE = 0
+
         # whether to include the discriminator feature-matching loss as part of loss_gen
         FEATURE_MATCH = True
         # architectural parameter for the generator (specifically, the ‘loudness’ branch)
@@ -114,6 +121,9 @@ if __name__ == "__main__":
         
         # checkpoint to resume training from
         CKPT = None
+        # checkpoint to load model but not training state from
+        TRANSFER_CKPT = None
+
         # path to store preprocessed dataset, or to already preprocessed data
         PREPROCESSED = None
         TEST_PREPROCESSED = None
@@ -153,44 +163,66 @@ if __name__ == "__main__":
     args.parse_args()
 
     assert args.NAME is not None
-    model = RAVE(
-        data_size=args.DATA_SIZE,
-        capacity=args.CAPACITY,
-        boom=args.BOOM,
-        latent_size=args.LATENT_SIZE,
-        ratios=args.RATIOS,
-        narrow=args.NARROW,
-        bias=args.BIAS,
-        encoder_norm=args.ENCODER_NORM,
-        loud_stride=args.LOUD_STRIDE,
-        use_noise=args.USE_NOISE,
-        noise_ratios=args.NOISE_RATIOS,
-        noise_bands=args.NOISE_BANDS,
-        d_capacity=args.D_CAPACITY,
-        d_multiplier=args.D_MULTIPLIER,
-        d_n_layers=args.D_N_LAYERS,
-        d_stack_factor=args.D_STACK_FACTOR,
-        pair_discriminator=args.PAIR_DISCRIMINATOR,
-        ged=args.GED,
-        adversarial_loss=args.ADVERSARIAL_LOSS,
-        freeze_encoder=args.FREEZE_ENCODER,
-        warmup=args.WARMUP,
-        # kl_cycle=args.KL_CYCLE,
-        mode=args.MODE,
-        no_latency=args.NO_LATENCY,
-        sr=args.SR,
-        min_kl=args.MIN_KL,
-        max_kl=args.MAX_KL,
-        sample_kl=args.SAMPLE_KL,
-        path_derivative=args.PATH_DERIVATIVE,
-        cropped_latent_size=args.CROPPED_LATENT_SIZE,
-        feature_match=args.FEATURE_MATCH,
-        gen_lr=args.GEN_LR,
-        dis_lr=args.DIS_LR,
-        gen_adam_betas=args.GEN_ADAM_BETAS,
-        dis_adam_betas=args.DIS_ADAM_BETAS,
-        grad_clip=args.GRAD_CLIP,
-    )
+
+    if args.TRANSFER_CKPT is not None:
+        if args.CKPT is not None:
+            raise ValueError("""
+            supply either TRANSFER_CKPT and CKPT but not both
+            """)
+        # well this is horrible
+        # would be very nice if effortless_config gave a way to get just the supplied arguments...
+        # maybe it would be cleaner to specify just the params to exclude actually
+        # though it looks like there is no way to even get just the lists of arguments??
+        xfer_hp = (
+            'freeze_encoder', 'adversarial_loss', 'ged', 'feature_match',
+            'pair_discriminator', 'dis_lr', 'dis_adam_betas', 'grad_clip',
+            'd_capacity', 'd_multiplier', 'd_n_layers', 'd_stack_factor',
+            'use_noise'
+        )
+        model = RAVE.load_from_checkpoint(args.TRANSFER_CKPT, **{
+            a:getattr(args, a.upper()) for a in xfer_hp
+        }, strict=False)
+        if args.CROPPED_LATENT_SIZE > 0:
+            model.crop_latent_space(args.CROPPED_LATENT_SIZE, args.TOTAL_LATENT_SIZE)
+    else:
+        model = RAVE(
+            data_size=args.DATA_SIZE,
+            capacity=args.CAPACITY,
+            boom=args.BOOM,
+            latent_size=args.LATENT_SIZE,
+            ratios=args.RATIOS,
+            narrow=args.NARROW,
+            bias=args.BIAS,
+            encoder_norm=args.ENCODER_NORM,
+            loud_stride=args.LOUD_STRIDE,
+            use_noise=args.USE_NOISE,
+            noise_ratios=args.NOISE_RATIOS,
+            noise_bands=args.NOISE_BANDS,
+            d_capacity=args.D_CAPACITY,
+            d_multiplier=args.D_MULTIPLIER,
+            d_n_layers=args.D_N_LAYERS,
+            d_stack_factor=args.D_STACK_FACTOR,
+            pair_discriminator=args.PAIR_DISCRIMINATOR,
+            ged=args.GED,
+            adversarial_loss=args.ADVERSARIAL_LOSS,
+            freeze_encoder=args.FREEZE_ENCODER,
+            warmup=args.WARMUP,
+            # kl_cycle=args.KL_CYCLE,
+            mode=args.MODE,
+            no_latency=args.NO_LATENCY,
+            sr=args.SR,
+            min_kl=args.MIN_KL,
+            max_kl=args.MAX_KL,
+            sample_kl=args.SAMPLE_KL,
+            path_derivative=args.PATH_DERIVATIVE,
+            cropped_latent_size=args.CROPPED_LATENT_SIZE,
+            feature_match=args.FEATURE_MATCH,
+            gen_lr=args.GEN_LR,
+            dis_lr=args.DIS_LR,
+            gen_adam_betas=args.GEN_ADAM_BETAS,
+            dis_adam_betas=args.DIS_ADAM_BETAS,
+            grad_clip=args.GRAD_CLIP,
+        )
 
     x = {
         'source':torch.zeros(args.BATCH, 2**14),
@@ -326,8 +358,5 @@ if __name__ == "__main__":
     if run is not None:
         step = torch.load(run, map_location='cpu')["global_step"]
         trainer.fit_loop.epoch_loop._batches_that_stepped = step #???
-
-    if model.cropped_latent_size > args.CROPPED_LATENT_SIZE:
-        model.crop_latent_space(args.CROPPED_LATENT_SIZE)
 
     trainer.fit(model, train, [val, test], ckpt_path=run)

@@ -165,7 +165,7 @@ def classic_inverse(x, hk):
         filter bank ( M x T )
     """
     hk = hk.flip(-1)
-    y = torch.zeros(*x.shape[:2], hk.shape[0] * x.shape[-1]).to(x)
+    y = x.new_zeros(*x.shape[:2], hk.shape[0] * x.shape[-1])
     y[..., ::hk.shape[0]] = x * hk.shape[0]
     y = nn.functional.conv1d(
         y,

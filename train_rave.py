@@ -20,6 +20,7 @@ if __name__ == "__main__":
 
     class args(Config):
         groups = ["small", "large"]
+        PROFILE = False
 
         # number of channels in PQMF filter
         DATA_SIZE = 16
@@ -79,12 +80,10 @@ if __name__ == "__main__":
 
         # CAPACITY but for the discriminator
         D_CAPACITY = 16
-        # interacts with D_CAPACITY and D_N_LAYERS to set the layer widths, conv groups, and strides in discriminator
-        # D_MULTIPLIER = 4
-        # discriminator depth
-        # D_N_LAYERS = 4
-        # stacked discriminator pooling factor
-        # D_STACK_FACTOR = 2
+        # linear warmup adversarial loss
+        D_WARMUP = 10000
+        # max adversarial loss weight
+        MAX_GAMMA = 1.0
 
         # changes the discriminator to operate on (real, fake) vs (fake, fake) 
         # pairs, which has the effect of making it a conditional GAN:
@@ -168,6 +167,8 @@ if __name__ == "__main__":
         noise_ratios=args.NOISE_RATIOS,
         noise_bands=args.NOISE_BANDS,
         d_capacity=args.D_CAPACITY,
+        d_warmup=args.D_WARMUP,
+        max_gamma=args.MAX_GAMMA,
         # d_multiplier=args.D_MULTIPLIER,
         # d_n_layers=args.D_N_LAYERS,
         # d_stack_factor=args.D_STACK_FACTOR,
@@ -328,4 +329,20 @@ if __name__ == "__main__":
         step = torch.load(run, map_location='cpu')["global_step"]
         trainer.fit_loop.epoch_loop._batches_that_stepped = step #???
 
-    trainer.fit(model, train, [val, test], ckpt_path=run)
+    if args.PROFILE:
+        model.cuda()
+        from torch.profiler import profile, ProfilerActivity
+        it = iter(train)
+        def step():
+            batch = next(it)
+            batch = {k:v.to(device='cuda',non_blocking=True) for k,v in batch.items()}
+            model.training_step(batch, 0)
+        for _ in range(8):
+            step()
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+            for _ in range(4):
+                step()
+        prof.export_chrome_trace("trace.json")
+    else:
+        trainer.fit(model, train, [val, test], ckpt_path=run)

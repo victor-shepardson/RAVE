@@ -590,9 +590,8 @@ class RAVE(pl.LightningModule):
                  noise_ratios,
                  noise_bands,
                  d_capacity,
-                #  d_multiplier,
-                #  d_n_layers,
-                #  d_stack_factor,
+                 d_warmup,
+                 max_gamma,
                  pair_discriminator,
                  ged,
                  adversarial_loss,
@@ -681,6 +680,8 @@ class RAVE(pl.LightningModule):
         self.register_buffer("latent_pca", torch.eye(encoder_out_size))
         self.register_buffer("latent_mean", torch.zeros(encoder_out_size))
         self.register_buffer("fidelity", torch.zeros(encoder_out_size))
+
+        self.register_buffer("discriminator_step", torch.tensor(0.))
 
         self.latent_size = latent_size
 
@@ -782,7 +783,8 @@ class RAVE(pl.LightningModule):
                 z.shape[0],
                 self.latent_size - self.cropped_latent_size,
                 z.shape[-1],
-            ).to(z.device)
+                device = z.device
+            )#.to(z.device)
             z = torch.cat([z, noise], 1)
         return z, kl
 
@@ -951,6 +953,13 @@ class RAVE(pl.LightningModule):
             self.global_step, self.hparams['warmup'], self.min_kl, self.max_kl)
         loss_kld = beta * kl
 
+        # linear warmup adversarial loss
+        max_gamma = self.hparams['max_gamma']
+        gamma = (
+            self.discriminator_step / self.hparams['d_warmup'] 
+            * max_gamma).clamp(0,max_gamma)
+        loss_adv = gamma * loss_adv
+
         loss_gen = distance + loss_kld
         if self.hparams['adversarial_loss']:
             loss_gen = loss_gen + loss_adv
@@ -960,6 +969,8 @@ class RAVE(pl.LightningModule):
 
         # OPTIMIZATION
         grad_clip = self.hparams['grad_clip']
+
+        if self.trainer is None: return
 
         if use_discriminator:
             gen_opt, dis_opt = self.optimizers()
@@ -976,6 +987,8 @@ class RAVE(pl.LightningModule):
                 self.log('grad_norm_discriminator', dis_grad)
 
             dis_opt.step()
+
+            self.discriminator_step += 1
         else:
             gen_opt.zero_grad()
             loss_gen.backward()
@@ -1008,6 +1021,8 @@ class RAVE(pl.LightningModule):
         self.log("kld_bps", self.npz_to_bps(kl))
         # beta-VAE parameter
         self.log("beta", beta)
+        # discriminator warmup parameter
+        self.log("gamma", gamma)
 
         if use_discriminator:
             # total discriminator loss

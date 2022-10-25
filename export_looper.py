@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
+import numpy as np
+
 # import numpy as np
 # from einops import rearrange
 
@@ -51,9 +53,11 @@ class LivingLooper(nn.Module):
     record_index:int
     n_memory:int
     loop_length:int
+    block_size:int
+    sampling_rate:int
     trained_cropped:bool
 
-    has_model:List[bool]
+    # has_model:List[bool]
 
     def __init__(self, 
             rave_model:RAVE, 
@@ -66,8 +70,8 @@ class LivingLooper(nn.Module):
         self.n_context = n_context
         self.n_memory = n_memory
 
-        # if n_latent is not None:
-            # rave_model.crop_latent_space(n_latent)
+        self.block_size = model.block_size()
+        self.sampling_rate = model.hparams['sr']
 
         self.trained_cropped = bool(rave_model.cropped_latent_size)
         self.n_latent = (
@@ -92,6 +96,10 @@ class LivingLooper(nn.Module):
             torch.empty(self.n_loops, self.n_latent, 
                 requires_grad=False))
 
+        self.register_buffer('mask', 
+            torch.empty(self.n_loops, 
+                requires_grad=False))
+
         self.register_buffer('memory', 
             torch.empty(n_memory, n_loops, self.n_latent,
                 requires_grad=False))
@@ -105,10 +113,10 @@ class LivingLooper(nn.Module):
         self.loop_length = 0
 
         self.memory.zero_()
+        self.mask.zero_()
         self.weights.zero_()
         self.bias.zero_()
         self.center.zero_()
-        self.has_model = [False]*self.n_loops
 
     def forward(self, i:int, x):
         """
@@ -141,8 +149,9 @@ class LivingLooper(nn.Module):
                     # targets = targets.view(targets.shape[0], -1)
                     self.fit_loop(self.loop_index, features, targets)
             if i>=0: # starting a new loop recording
-                self.loop_index = i
                 self.loop_length = 0
+            self.loop_index = i
+                
         if i>=0:
             # print(x.shape)
             # slice on LHS to appease torchscript
@@ -160,8 +169,6 @@ class LivingLooper(nn.Module):
 
         # print([f'{z.shape}' for z in zs])
 
-        # zs = torch.cat(zs)
-
         # update memory
         self.record_frame(zs)
         if self.loop_index >= 0:
@@ -169,13 +176,21 @@ class LivingLooper(nn.Module):
 
         y = self.decode(zs[...,None]) # add time dim
 
-        # silence any loops which don't have a model
-        mask = torch.cat(
-            [torch.ones(1,1,1) if i==j or b else torch.zeros(1,1,1) 
-            for j,b in enumerate(self.has_model)])
-        y = y * mask
-#
+        # this seems to have been causing some kind of memory fragmentation or leak?
+        # mask = torch.cat(
+        #     [torch.ones(1,1,1) if i==j or b else torch.zeros(1,1,1) 
+        #     for j,b in enumerate(self.has_model)])
+        # y = y * mask
+
+        y = y * self.mask[:,None,None]
+
         # print(f'{self.loop_length}, {self.record_index}, {self.loop_index}')
+
+        # return torch.stack((
+        #     (torch.rand(self.block_size)-0.5)/3, 
+        #     torch.zeros(self.block_size),
+        #     (torch.arange(0,self.block_size)/128*2*np.pi).sin()/3 
+        # ))[:,None]
 
         return y
 
@@ -245,7 +260,6 @@ class LivingLooper(nn.Module):
         y = y.view(y.shape[0], -1)
         
         y = y.abs().pow(2) * y.sign()
-        # y = y.pow(3)
 
         c = x.mean(0)
         self.center[i, :] = c
@@ -261,7 +275,7 @@ class LivingLooper(nn.Module):
         # print(x.norm(), y.norm(), w.norm())
         # print(y)
 
-        self.has_model[i] = True
+        self.mask[i] = 1.
 
     def eval_loop(self, i:int, x):
         """
@@ -273,7 +287,6 @@ class LivingLooper(nn.Module):
         """
         y = self.feat_process(i, x) @ self.weights[i] + self.bias[i]
         y = y.abs().pow(1/2) * y.sign()
-        # y = y.abs().pow(1/3) * y.sign()
         return y
 
               
@@ -283,11 +296,12 @@ logging.info("loading RAVE model from checkpoint")
 RUN = search_for_run(args.RUN)
 logging.info(f"using {RUN}")
 
-debug_kw = {'cropped_latent_size':16, 'latent_size':128} ###DEBUG
+debug_kw = {}#{'cropped_latent_size':16, 'latent_size':128} ###DEBUG
 
 model = RAVE.load_from_checkpoint(RUN, **debug_kw, strict=False).eval()
 
-# model.cropped_latent_size = args.LATENT_SIZE # TODO
+if args.LATENT_SIZE is not None:
+    model.crop_latent_space(int(args.LATENT_SIZE))
 
 logging.info("flattening weights")
 for m in model.modules():
@@ -317,19 +331,12 @@ sr = model.sr
 # print(model.encoder.net[-1].cache.pad.shape)
 
 assert int(args.SR) == sr, f"model sample rate is {sr}"
-# if args.SR is not None:
-#     target_sr = int(args.SR)
-# else:
-#     target_sr = sr
-
-# logging.info("build resampling model")
-# resample = Resampling(target_sr, sr)
-# x = torch.zeros(1, 1, 2**14)
-# resample.to_target_sampling_rate(resample.from_target_sampling_rate(x))
 
 logging.info("creating looper")
 ls = None if args.LATENT_SIZE is None else int(args.LATENT_SIZE)
 looper = LivingLooper(model, args.LOOPS, args.CONTEXT, args.MEMORY, ls)
+looper.eval()
+
 # smoke test
 def feed(i):
     x = torch.zeros(1, 1, 2**11)
@@ -346,13 +353,7 @@ def smoke_test():
         feed(0)
     for _ in range(10):
         feed(3)
-# x = torch.zeros(1, 1, 2**11)
-# looper(0, x)
-# looper(1, x)
-# looper(1, x)
-# looper(1, x)
-# looper(2, x)
-# looper(0, x)
+
 logging.info("smoke test with pytorch")
 smoke_test()
 

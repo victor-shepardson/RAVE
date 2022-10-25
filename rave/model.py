@@ -306,7 +306,7 @@ class Generator(nn.Module):
 class LayerNorm1d(nn.Module):
     def forward(self, x):
         x = x - x.mean(1, keepdim=True)
-        return x / (1e-5 + x.norm(dim=1, keepdim=True))
+        return x / (1e-5 + torch.linalg.vector_norm(x, dim=1, keepdim=True))
 
 class Encoder(nn.Module):
     def __init__(self,
@@ -1068,11 +1068,13 @@ class RAVE(pl.LightningModule):
         if loader_idx>0:
             return torch.cat([target, y, y2], -1), mean, None
 
+    def block_size(self):
+        return np.prod(self.hparams['ratios']) * self.hparams['data_size'] 
+
     def npz_to_bps(self, npz):
         """convert nats per z frame to bits per second"""
-        return (npz * self.hparams['sr'] 
-            / np.prod(self.hparams['ratios']) 
-            / self.hparams['data_size'] 
+        return (npz 
+            * self.hparams['sr'] / self.block_size() 
             * np.log2(np.e))      
 
     def crop_latent_space(self, n, decoder_latent_size=0):

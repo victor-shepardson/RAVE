@@ -303,6 +303,11 @@ class Generator(nn.Module):
 
         return waveform
 
+class LayerNorm1d(nn.Module):
+    def forward(self, x):
+        x = x - x.mean(1, keepdim=True)
+        return x / (1e-5 + x.norm(dim=1, keepdim=True))
+
 class Encoder(nn.Module):
     def __init__(self,
                  data_size,
@@ -334,7 +339,9 @@ class Encoder(nn.Module):
         if norm=='batch':
             norm = lambda d: nn.BatchNorm1d(d)
         elif norm=='instance':
-            norm = lambda d: nn.InstanceNorm1d(d)
+            norm = lambda d: nn.InstanceNorm1d(d, track_running_stats=True)
+        elif norm=='layer':
+            norm = lambda d: LayerNorm1d()
 
         latent_params = 2 # mean, scale
 

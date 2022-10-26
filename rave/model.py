@@ -622,16 +622,17 @@ class RAVE(pl.LightningModule):
 
         self.idx = 0
 
-        self.register_buffer("latent_pca", torch.eye(latent_size))
-        self.register_buffer("latent_mean", torch.zeros(latent_size))
-        self.register_buffer("fidelity", torch.zeros(latent_size))
+        # self.register_buffer("latent_pca", torch.eye(latent_size))
+        # self.register_buffer("latent_mean", torch.zeros(latent_size))
+        # self.register_buffer("fidelity", torch.zeros(latent_size))
 
-        # this will track the most informative dimensions of latent space
-        # by KLD, in descending order, computed at each validation step
-        self.register_buffer("kld_idxs", 
-            torch.zeros(latent_size, dtype=torch.long))
+        # # this will track the most informative dimensions of latent space
+        # # by KLD, in descending order, computed at each validation step
+        # self.register_buffer("kld_idxs", 
+        #     torch.zeros(latent_size, dtype=torch.long))
 
         self.latent_size = latent_size
+
 
         # tell lightning we are doing manual optimization
         self.automatic_optimization = False 
@@ -647,8 +648,19 @@ class RAVE(pl.LightningModule):
 
         self.register_buffer("saved_step", torch.tensor(0))
 
+        self.init_buffers()
+
         if cropped_latent_size:
             self.crop_latent_space(cropped_latent_size)
+
+    def init_buffers(self):
+        self.register_buffer("latent_pca", torch.eye(self.latent_size))
+        self.register_buffer("latent_mean", torch.zeros(self.latent_size))
+        self.register_buffer("fidelity", torch.zeros(self.latent_size))
+        # this will track the most informative dimensions of latent space
+        # by KLD, in descending order, computed at each validation step
+        self.register_buffer("kld_idxs", 
+            torch.zeros(self.latent_size, dtype=torch.long))
 
     def configure_optimizers(self):
         gen_p = list(self.encoder.parameters())
@@ -1078,8 +1090,21 @@ class RAVE(pl.LightningModule):
             * np.log2(np.e))      
 
     def crop_latent_space(self, n, decoder_latent_size=0):
+
+        # if latent_mean is used in the PCA transform,
+        # there will be some error due to zero padding,
+        # (when the first decoder layer has k>1 anyway)
+        use_mean = False
+
+        # get test value
+        x = torch.randn(1,self.hparams['data_size'],self.block_size())
+        z, _ = self.split_params(self.encoder(x))
+        # y = self.decoder(z, add_noise=self.hparams['use_noise'])
+        y = self.decoder.net[0](z)
+        # y_perturb = self.decoder(z+torch.randn_like(z)/3, add_noise=self.hparams['use_noise'])
+        y_perturb = self.decoder.net[0](z+torch.randn_like(z)/3)
+
         # with PCA:
-        # project and prune the final encoder layers
         pca = self.latent_pca[:n]
         # w: (out, in, kernel)
         # b: (out)
@@ -1089,8 +1114,13 @@ class RAVE(pl.LightningModule):
             nn.utils.remove_weight_norm(layer_in)
         if hasattr(layer_prev, "weight_g"):
             nn.utils.remove_weight_norm(layer_prev)
+        layer_out = self.decoder.net[0]
+        if hasattr(layer_out, "weight_g"):
+            nn.utils.remove_weight_norm(layer_out)
+        # project and prune the final encoder layers
         W, b = layer_in.weight, layer_in.bias
         Wp, bp = layer_prev.weight, layer_prev.bias
+
         # remove the scale parameters
         W, _ = W.chunk(2, 0)
         b, _ = b.chunk(2, 0)
@@ -1099,7 +1129,7 @@ class RAVE(pl.LightningModule):
         # U(WX + b - c) = (UW)X + U(b - c)
         # (out',out) @ (k,out,in) -> (k, out', in)
         W = (pca @ W.permute(2,0,1)).permute(1,2,0)
-        b = pca @ (b - self.latent_mean)
+        b = pca @ ((b - self.latent_mean) if use_mean else b)
         # assign back
         layer_in.weight, layer_in.bias = nn.Parameter(W), nn.Parameter(b)
         layer_in.in_channels = layer_in.in_channels//2
@@ -1109,15 +1139,15 @@ class RAVE(pl.LightningModule):
         layer_prev.out_channels = layer_prev.out_channels//2
 
         # project the first decoder layer
-        layer_out = self.decoder.net[0]
-        if hasattr(layer_out, "weight_g"):
-            nn.utils.remove_weight_norm(layer_out)
+        inv_pca = self.latent_pca.T
+        # inv_pca = torch.linalg.inv(self.latent_pca)
 
         # W(UX + c) + b = (WU)X + (Wc + b)
         # (k, out, in) @ (in,in') -> (k, out, in')
         W, b = layer_out.weight, layer_out.bias
-        W = (W.permute(2,0,1) @ self.latent_pca.T).permute(1,2,0)
-        b = W.sum(-1) @ self.latent_mean + b
+        if use_mean:
+            b = W.sum(-1) @ self.latent_mean + b # sum over kernel dimension
+        W = (W.permute(2,0,1) @ inv_pca).permute(1,2,0) #* 0.1
 
         # finally, set the number of noise dimensions
         if decoder_latent_size:
@@ -1129,8 +1159,8 @@ class RAVE(pl.LightningModule):
                 # expand
                 new_dims = decoder_latent_size-self.latent_size
                 W2 = torch.randn(W.shape[0], new_dims, W.shape[2], device=W.device, dtype=W.dtype)
-                W2 = 0.1 * W2 / W2.norm(dim=(1,2), keepdim=True) * W.norm(dim=(1,2)).mean()
-                W = torch.cat((W, W2), 1)
+                W2 = W2 / W2.norm(dim=(0,2), keepdim=True) * W.norm(dim=(0,2)).min()
+                W = torch.cat((W[:,:n], W[:,n:]*0.01, W2*0.01), 1)
             else:
                 # crop
                 W = W[:,:decoder_latent_size]
@@ -1147,10 +1177,18 @@ class RAVE(pl.LightningModule):
         for layer in (layer_in, layer_prev, layer_out):
             if hasattr(layer, 'cache'):
                 layer.cache.initialized = False
-        # if cc.USE_BUFFER_CONV:
-        #     layer_in.cache.initialized = False
-        #     layer_prev.cache.initialized = False
-        #     layer_out.cache.initialized = False
+
+        # the old PCA weights etc aren't needed anymore,
+        # it would be nice to keep them around for reference but
+        # the size change is causing model loading headaches
+        self.init_buffers()
+
+        # test
+        z2, _ = self.split_params(self.encoder(x))
+        # print('z (should be different)', (z-z2).norm(), z.norm(), z2.norm())
+        # y2 = self.decoder(self.pad_latent(z2), add_noise=self.hparams['use_noise'])
+        y2 = self.decoder.net[0](self.pad_latent(z2))
+        print(f'{(y-y2).norm()=}, {y.norm()=}, {y2.norm()=}, {(y-y_perturb).norm()=}')
 
         # # without PCA:
         # # find the n most important latent dimensions

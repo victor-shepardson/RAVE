@@ -150,6 +150,7 @@ class LivingLooper(nn.Module):
                     self.fit_loop(self.loop_index, features, targets)
             if i>=0: # starting a new loop recording
                 self.loop_length = 0
+                self.mask[i] = 0
             self.loop_index = i
                 
         if i>=0:
@@ -296,7 +297,9 @@ logging.info("loading RAVE model from checkpoint")
 RUN = search_for_run(args.RUN)
 logging.info(f"using {RUN}")
 
-debug_kw = {}#{'cropped_latent_size':16, 'latent_size':128} ###DEBUG
+# debug_kw = {}
+debug_kw = {'cropped_latent_size':16, 'latent_size':128} ###DEBUG
+# debug_kw = {'cropped_latent_size':8, 'latent_size':128} ###DEBUG
 
 model = RAVE.load_from_checkpoint(RUN, **debug_kw, strict=False).eval()
 

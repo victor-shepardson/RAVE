@@ -1149,6 +1149,9 @@ class RAVE(pl.LightningModule):
             b = W.sum(-1) @ self.latent_mean + b # sum over kernel dimension
         W = (W.permute(2,0,1) @ inv_pca).permute(1,2,0) #* 0.1
 
+        # better initialization for noise weights 
+        W = torch.cat((W[:,:n], W[:,n:]*0.01), 1)
+
         # finally, set the number of noise dimensions
         if decoder_latent_size:
             if decoder_latent_size < n:
@@ -1159,8 +1162,8 @@ class RAVE(pl.LightningModule):
                 # expand
                 new_dims = decoder_latent_size-self.latent_size
                 W2 = torch.randn(W.shape[0], new_dims, W.shape[2], device=W.device, dtype=W.dtype)
-                W2 = W2 / W2.norm(dim=(0,2), keepdim=True) * W.norm(dim=(0,2)).min()
-                W = torch.cat((W[:,:n], W[:,n:]*0.01, W2*0.01), 1)
+                W2 = 0.01 * W2 / W2.norm(dim=(0,2), keepdim=True) * W.norm(dim=(0,2)).min()
+                W = torch.cat((W, W2), 1)
             else:
                 # crop
                 W = W[:,:decoder_latent_size]

@@ -21,6 +21,8 @@ if __name__ == "__main__":
     class args(Config):
         groups = ["small", "large"]
 
+        PROFILE = False
+
         # number of channels in PQMF filter
         DATA_SIZE = 16
         # hidden layer width for the encoder and generator
@@ -359,4 +361,24 @@ if __name__ == "__main__":
         step = torch.load(run, map_location='cpu')["global_step"]
         trainer.fit_loop.epoch_loop._batches_that_stepped = step #???
 
-    trainer.fit(model, train, [val, test], ckpt_path=run)
+    # trainer.fit(model, train, [val, test], ckpt_path=run)
+    if args.PROFILE:
+        model.cuda()
+        from torch.profiler import profile, ProfilerActivity
+        from torch.cuda import nvtx
+        it = iter(train)
+        def step():
+            batch = next(it)
+            batch = {k:v.to(device='cuda',non_blocking=True) for k,v in batch.items()}
+            nvtx.range_push('step')
+            model.training_step(batch, 0)
+            nvtx.range_pop()
+        for _ in range(8):
+            step()
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+            for _ in range(4):
+                step()
+        prof.export_chrome_trace("trace.json")
+    else:
+        trainer.fit(model, train, [val, test], ckpt_path=run)

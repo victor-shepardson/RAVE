@@ -1,6 +1,11 @@
 import torch
 import torch.nn as nn
-import torch.nn.utils.weight_norm as wn
+from torch import Tensor
+from typing import List
+# import torch.nn.utils.weight_norm as wn
+# from torch.nn.utils import remove_weight_norm
+from .weight_norm import weight_norm as wn
+from .weight_norm import remove_weight_norm
 import numpy as np
 import pytorch_lightning as pl
 from .core import multiscale_stft, Loudness, mod_sigmoid
@@ -98,7 +103,7 @@ class ResidualStack(nn.Module):
             net.append(Residual(res_net, cumulative_delay=res_cum_delay))
             res_cum_delay = net[-1].cumulative_delay
 
-        self.net = cc.CachedSequential(*net)
+        self.net = torch.jit.script(cc.CachedSequential(*net))
         self.cumulative_delay = self.net.cumulative_delay + cumulative_delay
 
     def forward(self, x):
@@ -473,13 +478,13 @@ class Discriminator(nn.Module):
         net = [
             wn(cc.Conv1d(in_size, out_size, 15, padding=cc.get_padding(15)))
         ]
-        net.append(nn.LeakyReLU(.2))
 
         for i in range(n_layers):
             in_size = out_size
             out_size = min(1024, in_size*multiplier)
 
-            net.append(
+            net.append(nn.Sequential(
+                nn.LeakyReLU(.2),
                 wn(
                     cc.Conv1d(
                         in_size,
@@ -488,29 +493,78 @@ class Discriminator(nn.Module):
                         stride=multiplier,
                         padding=cc.get_padding(41, multiplier),
                         groups=out_size//capacity
-                    )))
-            net.append(nn.LeakyReLU(.2))
+                    ))))
 
-        net.append(
+        net.append(nn.Sequential(
+            nn.LeakyReLU(.2),
             wn(
                 cc.Conv1d(
                     out_size,
                     out_size,
                     5,
                     padding=cc.get_padding(5),
-                )))
-        net.append(nn.LeakyReLU(.2))
-        net.append(
-            wn(cc.Conv1d(out_size, 1, 1)))
+                ))))
+
+        net.append(nn.Sequential(
+            nn.LeakyReLU(.2),
+            wn(cc.Conv1d(out_size, 1, 1))))
+
         self.net = nn.ModuleList(net)
 
     def forward(self, x):
-        feature = []
+        feature:List[Tensor] = []
         for layer in self.net:
             x = layer(x)
-            if isinstance(layer, nn.Conv1d):
-                feature.append(x)
+            feature.append(x)
         return feature
+
+# class Discriminator(nn.Module):
+#     def __init__(self, in_size, capacity, multiplier, n_layers):
+#         super().__init__()
+
+#         out_size = capacity
+
+#         net = [
+#             wn(cc.Conv1d(in_size, out_size, 15, padding=cc.get_padding(15)))
+#         ]
+#         net.append(nn.LeakyReLU(.2))
+
+#         for i in range(n_layers):
+#             in_size = out_size
+#             out_size = min(1024, in_size*multiplier)
+
+#             net.append(
+#                 wn(
+#                     cc.Conv1d(
+#                         in_size,
+#                         out_size,
+#                         41,
+#                         stride=multiplier,
+#                         padding=cc.get_padding(41, multiplier),
+#                         groups=out_size//capacity
+#                     )))
+#             net.append(nn.LeakyReLU(.2))
+
+#         net.append(
+#             wn(
+#                 cc.Conv1d(
+#                     out_size,
+#                     out_size,
+#                     5,
+#                     padding=cc.get_padding(5),
+#                 )))
+#         net.append(nn.LeakyReLU(.2))
+#         net.append(
+#             wn(cc.Conv1d(out_size, 1, 1)))
+#         self.net = nn.ModuleList(net)
+
+#     def forward(self, x):
+#         feature = []
+#         for layer in self.net:
+#             x = layer(x)
+#             if isinstance(layer, nn.Conv1d):
+#                 feature.append(x)
+#         return feature
 
 
 class StackDiscriminators(nn.Module):
@@ -521,7 +575,7 @@ class StackDiscriminators(nn.Module):
             [Discriminator(*args, **kwargs) for i in range(n_dis)], )
 
     def forward(self, x):
-        features = []
+        features:List[List[Tensor]] = []
         for layer in self.discriminators:
             features.append(layer(x))
             x = nn.functional.avg_pool1d(x, self.factor)
@@ -610,13 +664,13 @@ class RAVE(pl.LightningModule):
             print(f'{n}: {p.numel()}')
 
         if adversarial_loss or feature_match:
-            self.discriminator = StackDiscriminators(
+            self.discriminator = torch.jit.script(StackDiscriminators(
                 3, factor=d_stack_factor,
                 in_size=2 if pair_discriminator else 1,
                 capacity=d_capacity,
                 multiplier=d_multiplier,
                 n_layers=d_n_layers
-                )
+                ))
         else:
             self.discriminator = None
 
@@ -1111,12 +1165,12 @@ class RAVE(pl.LightningModule):
         layer_in = self.encoder.net[-1]
         layer_prev = self.encoder.net[-3]
         if hasattr(layer_in, "weight_g"):
-            nn.utils.remove_weight_norm(layer_in)
+            remove_weight_norm(layer_in)
         if hasattr(layer_prev, "weight_g"):
-            nn.utils.remove_weight_norm(layer_prev)
+            remove_weight_norm(layer_prev)
         layer_out = self.decoder.net[0]
         if hasattr(layer_out, "weight_g"):
-            nn.utils.remove_weight_norm(layer_out)
+            remove_weight_norm(layer_out)
         # project and prune the final encoder layers
         W, b = layer_in.weight, layer_in.bias
         Wp, bp = layer_prev.weight, layer_prev.bias

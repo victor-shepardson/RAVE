@@ -103,7 +103,8 @@ class ResidualStack(nn.Module):
             net.append(Residual(res_net, cumulative_delay=res_cum_delay))
             res_cum_delay = net[-1].cumulative_delay
 
-        self.net = torch.jit.script(cc.CachedSequential(*net))
+        # self.net = torch.jit.script(cc.CachedSequential(*net))
+        self.net = cc.CachedSequential(*net)
         self.cumulative_delay = self.net.cumulative_delay + cumulative_delay
 
     def forward(self, x):
@@ -204,8 +205,12 @@ class Generator(nn.Module):
                  noise_ratios,
                  noise_bands,
                  padding_mode,
-                 bias=False):
+                 bias=False,
+                 script=True
+            ):
         super().__init__()
+
+        maybe_script = torch.jit.script if script else lambda _:_
 
         out_dim = int(np.prod(ratios) * capacity // np.prod(narrow))
 
@@ -243,7 +248,7 @@ class Generator(nn.Module):
                     boom=boom
                 ))
 
-        self.net = cc.CachedSequential(*net)
+        self.net = maybe_script(cc.CachedSequential(*net))
 
         wave_gen = wn(
             cc.Conv1d(
@@ -324,9 +329,12 @@ class Encoder(nn.Module):
                  padding_mode,
                  norm=None,
                  bias=False,
+                 script=True,
                  ):
         super().__init__()
         maybe_wn = (lambda x:x) if norm=='batch' else wn
+
+        maybe_script = torch.jit.script if script else lambda _:_
 
         out_dim = capacity
 
@@ -389,7 +397,7 @@ class Encoder(nn.Module):
                 cumulative_delay=net[-2].cumulative_delay,
             )))
 
-        self.net = cc.CachedSequential(*net)
+        self.net = maybe_script(cc.CachedSequential(*net))
         self.cumulative_delay = self.net.cumulative_delay
         
     def forward(self, x, double:bool=False):
@@ -619,10 +627,13 @@ class RAVE(pl.LightningModule):
                  dis_lr=1e-4,
                  gen_adam_betas=(0.5,0.9),
                  dis_adam_betas=(0.5,0.9),
-                 grad_clip=None
+                 grad_clip=None,
+                 script=True
                 ):
         super().__init__()
         self.save_hyperparameters()
+
+        maybe_script = torch.jit.script if script else lambda _:_
 
         if data_size == 1:
             self.pqmf = None
@@ -641,6 +652,7 @@ class RAVE(pl.LightningModule):
             "causal" if no_latency else "centered",
             encoder_norm,
             bias,
+            script,
         )
         self.decoder = Generator(
             latent_size,
@@ -654,6 +666,7 @@ class RAVE(pl.LightningModule):
             noise_bands,
             "causal" if no_latency else "centered",
             bias,
+            script,
         )
 
         print('encoder')
@@ -664,7 +677,7 @@ class RAVE(pl.LightningModule):
             print(f'{n}: {p.numel()}')
 
         if adversarial_loss or feature_match:
-            self.discriminator = torch.jit.script(StackDiscriminators(
+            self.discriminator = maybe_script(StackDiscriminators(
                 3, factor=d_stack_factor,
                 in_size=2 if pair_discriminator else 1,
                 capacity=d_capacity,
@@ -1150,13 +1163,13 @@ class RAVE(pl.LightningModule):
         # (when the first decoder layer has k>1 anyway)
         use_mean = False
 
-        # get test value
-        x = torch.randn(1,self.hparams['data_size'],self.block_size())
-        z, _ = self.split_params(self.encoder(x))
-        # y = self.decoder(z, add_noise=self.hparams['use_noise'])
-        y = self.decoder.net[0](z)
-        # y_perturb = self.decoder(z+torch.randn_like(z)/3, add_noise=self.hparams['use_noise'])
-        y_perturb = self.decoder.net[0](z+torch.randn_like(z)/3)
+        # # get test value
+        # x = torch.randn(1,self.hparams['data_size'],self.block_size())
+        # z, _ = self.split_params(self.encoder(x))
+        # # y = self.decoder(z, add_noise=self.hparams['use_noise'])
+        # y = self.decoder.net[0](z)
+        # # y_perturb = self.decoder(z+torch.randn_like(z)/3, add_noise=self.hparams['use_noise'])
+        # y_perturb = self.decoder.net[0](z+torch.randn_like(z)/3)
 
         # with PCA:
         pca = self.latent_pca[:n]
@@ -1241,11 +1254,11 @@ class RAVE(pl.LightningModule):
         self.init_buffers()
 
         # test
-        z2, _ = self.split_params(self.encoder(x))
-        # print('z (should be different)', (z-z2).norm(), z.norm(), z2.norm())
-        # y2 = self.decoder(self.pad_latent(z2), add_noise=self.hparams['use_noise'])
-        y2 = self.decoder.net[0](self.pad_latent(z2))
-        print(f'{(y-y2).norm()=}, {y.norm()=}, {y2.norm()=}, {(y-y_perturb).norm()=}')
+        # z2, _ = self.split_params(self.encoder(x))
+        # # print('z (should be different)', (z-z2).norm(), z.norm(), z2.norm())
+        # # y2 = self.decoder(self.pad_latent(z2), add_noise=self.hparams['use_noise'])
+        # y2 = self.decoder.net[0](self.pad_latent(z2))
+        # print(f'{(y-y2).norm()=}, {y.norm()=}, {y2.norm()=}, {(y-y_perturb).norm()=}')
 
         # # without PCA:
         # # find the n most important latent dimensions

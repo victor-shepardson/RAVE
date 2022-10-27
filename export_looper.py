@@ -16,6 +16,8 @@ import cached_conv as cc
 from rave.model import RAVE
 from rave.core import search_for_run
 
+from rave.weight_norm import remove_weight_norm
+
 from effortless_config import Config
 
 class args(Config):
@@ -298,7 +300,7 @@ RUN = search_for_run(args.RUN)
 logging.info(f"using {RUN}")
 
 # debug_kw = {}
-debug_kw = {'cropped_latent_size':16, 'latent_size':128} ###DEBUG
+debug_kw = {'script':False, 'cropped_latent_size':24, 'latent_size':128} ###DEBUG
 # debug_kw = {'cropped_latent_size':8, 'latent_size':128} ###DEBUG
 
 model = RAVE.load_from_checkpoint(RUN, **debug_kw, strict=False).eval()
@@ -309,7 +311,7 @@ if args.LATENT_SIZE is not None:
 logging.info("flattening weights")
 for m in model.modules():
     if hasattr(m, "weight_g"):
-        nn.utils.remove_weight_norm(m)
+        remove_weight_norm(m)
 
 logging.info("warmup forward pass")
 x = torch.zeros(1, 1, 2**14)

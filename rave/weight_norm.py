@@ -7,26 +7,9 @@ from typing import Any, TypeVar, Tuple
 from torch.nn import Module
 
 __all__ = [
-    # 'WeightNorm', 
     'weight_norm',
-    # 'remove_weight_norm'
+    'remove_weight_norm'
     ]
-
-# class WeightNorm(object):
-#     name: str
-#     dim: int
-
-#     def __init__(self, name: str, dim: int) -> None:
-#         if dim is None:
-#             dim = -1
-#         self.name = name
-#         self.dim = dim
-
-#     # TODO Make return type more specific
-#     def compute_weight(self, module: Module) -> Any:
-#         g = getattr(module, self.name + '_g')
-#         v = getattr(module, self.name + '_v')
-#         return _weight_norm(v, g, self.dim)
 
 T_module = TypeVar('T_module', bound=Module)
 
@@ -50,7 +33,6 @@ def weight_norm(module: T_module) -> T_module:
     module.register_parameter('weight_g', Parameter(norm_except_dim(weight, 2, 0).data))
     module.register_parameter('weight_v', Parameter(weight.data))
     fn(module, None)
-    # setattr(module, name, fn.compute_weight(module))
 
     # recompute weight before every forward()
     module.register_forward_pre_hook(fn)

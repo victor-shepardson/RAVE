@@ -3,7 +3,7 @@ Weight Normalization from https://arxiv.org/abs/1602.07868
 """
 from torch.nn.parameter import Parameter, UninitializedParameter
 from torch import _weight_norm, norm_except_dim, Tensor
-from typing import Any, TypeVar, Tuple
+from typing import Any, TypeVar, Tuple, Optional, List
 from torch.nn import Module
 
 __all__ = [
@@ -24,7 +24,7 @@ def weight_norm(module: T_module) -> T_module:
     weight = getattr(module, 'weight')
     if isinstance(weight, UninitializedParameter):
         raise ValueError(
-            'The module passed to `WeightNorm` can\'t have uninitialized parameters. '
+            'The module passed to `weight_norm` can\'t have uninitialized parameters. '
             'Make sure to run the dummy forward before applying weight normalization')
     # remove w from parameter list
     del module._parameters['weight']

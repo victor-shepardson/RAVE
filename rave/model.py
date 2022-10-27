@@ -61,9 +61,12 @@ class ResidualStack(nn.Module):
                  cumulative_delay=0,
                  bias=False,
                  depth=3,
-                 boom=2):
+                 boom=2,
+                 script=False):
         super().__init__()
         net = []
+
+        maybe_script = torch.jit.script if script else lambda _:_
 
         res_cum_delay = 0
         # SEQUENTIAL RESIDUALS
@@ -103,8 +106,8 @@ class ResidualStack(nn.Module):
             net.append(Residual(res_net, cumulative_delay=res_cum_delay))
             res_cum_delay = net[-1].cumulative_delay
 
-        # self.net = torch.jit.script(cc.CachedSequential(*net))
-        self.net = cc.CachedSequential(*net)
+        self.net = maybe_script(cc.CachedSequential(*net))
+        # self.net = cc.CachedSequential(*net)
         self.cumulative_delay = self.net.cumulative_delay + cumulative_delay
 
     def forward(self, x):
@@ -210,7 +213,7 @@ class Generator(nn.Module):
             ):
         super().__init__()
 
-        maybe_script = torch.jit.script if script else lambda _:_
+        # maybe_script = torch.jit.script if script else lambda _:_
 
         out_dim = int(np.prod(ratios) * capacity // np.prod(narrow))
 
@@ -245,10 +248,12 @@ class Generator(nn.Module):
                     3,
                     padding_mode,
                     cumulative_delay=net[-1].cumulative_delay,
-                    boom=boom
+                    boom=boom,
+                    script=script
                 ))
 
-        self.net = maybe_script(cc.CachedSequential(*net))
+        # self.net = maybe_script(cc.CachedSequential(*net))
+        self.net =cc.CachedSequential(*net)
 
         wave_gen = wn(
             cc.Conv1d(

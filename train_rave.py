@@ -237,7 +237,7 @@ if __name__ == "__main__":
     preprocess = lambda name: simple_audio_preprocess(
         args.SR,
         2 * args.N_SIGNAL,
-    )(name).astype(np.float16)
+    )(name).astype(np.float16) #why float16 here?
 
     def AugmentDelay(max_delay=512):
         def fn(x):
@@ -246,6 +246,7 @@ if __name__ == "__main__":
             return x[:-d] + x[d:]*mix
         return fn
 
+    # TODO: use scipy interpolate for better quality
     def AugmentSpeed(semitones=1):
         def fn(x):
             coords = np.arange(len(x))

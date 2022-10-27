@@ -22,6 +22,7 @@ if __name__ == "__main__":
         groups = ["small", "large"]
 
         PROFILE = False
+        CKPT_EVERY = 30
 
         # number of channels in PQMF filter
         DATA_SIZE = 16
@@ -238,6 +239,55 @@ if __name__ == "__main__":
         2 * args.N_SIGNAL,
     )(name).astype(np.float16)
 
+    def AugmentDelay(max_delay=512):
+        def fn(x):
+            d = np.random.randint(1, max_delay)
+            mix = (np.random.rand()*2-1)**3
+            return x[:-d] + x[d:]*mix
+        return fn
+
+    def AugmentSpeed(semitones=1):
+        def fn(x):
+            coords = np.arange(len(x))
+            speed = 2**(np.random.randn()*semitones/36)
+            # print(f'{speed=}')
+            new_coords = coords/speed
+            new_len = int(np.max(new_coords))
+            return np.interp(coords[:new_len], new_coords[:new_len], x[:new_len])
+        return fn
+
+    def AugmentDistort(max_gain=32):
+        def fn(x):
+            mix = np.random.rand()**2
+            gain = 1 + np.random.rand()**2 * (max_gain-1)
+            # print(f'{mix=}, {gain=}')
+            return np.tanh(x*gain) * mix + x * (1-mix)
+        return fn
+        
+    def augment_split(x):
+        # independently for input / target
+        x = Dequantize(16)(x)
+        x = random_phase_mangle(x, 20, 2000, .99, args.SR).astype(np.float32)
+        return x
+
+    def AugmentGain(db=12, bits=16):
+        # multichannel across input / target
+        def fn(xs):
+            amps = [np.abs(x) for x in xs.values()]
+            peak = max(np.max(amp) for amp in amps)
+            # trough = min(np.quantile(amp, 0.001) for amp in amps)
+            ceil = 1
+            floor = 2**-bits
+            max_gain = min(ceil/peak, 10**(db/20))
+            min_gain = max(floor/peak*10, 10**(-db/20))
+            log_gain = (np.random.rand() 
+                * (np.log(max_gain/min_gain)) 
+                + np.log(min_gain))
+            gain = np.exp(log_gain)
+            # print(f'{gain=}') ### DEBUG
+            return {k:v*gain for k,v in xs.items()}
+        return fn
+
     dataset = SimpleDataset(
         args.PREPROCESSED,
         args.WAV,
@@ -245,13 +295,14 @@ if __name__ == "__main__":
         split_set="full",
         transforms=Compose([
             lambda x: x.astype(np.float32),
+            RandomApply(AugmentSpeed(semitones=1), p=0.9), 
+            RandomApply(AugmentDelay(max_delay=512), p=0.9),
+            RandomApply(AugmentDistort(max_gain=32), p=0.9),
             RandomCrop(args.N_SIGNAL),
-            # RandomApply(
             lambda x: {
-                tag: Dequantize(16)(
-                    random_phase_mangle(x, 20, 2000, .99, args.SR)
-                    ).astype(np.float32)
-                for tag in ('source', 'target')}
+                tag: augment_split(x)
+                for tag in ('source', 'target')},
+            AugmentGain(db=12),
             ])
         )
 
@@ -310,7 +361,7 @@ if __name__ == "__main__":
     #     filename="best",
     # )
     regular_checkpoint = pl.callbacks.ModelCheckpoint(
-        filename="{epoch}", save_top_k=-1, every_n_epochs=30
+        filename="{epoch}", save_top_k=-1, every_n_epochs=args.CKPT_EVERY
         )
     last_checkpoint = pl.callbacks.ModelCheckpoint(filename="last")
 

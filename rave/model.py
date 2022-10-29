@@ -339,7 +339,7 @@ class Encoder(nn.Module):
         super().__init__()
         maybe_wn = (lambda x:x) if norm=='batch' else wn
 
-        maybe_script = torch.jit.script if script else lambda _:_
+        # maybe_script = torch.jit.script if script else lambda _:_
 
         out_dim = capacity
 
@@ -376,7 +376,8 @@ class Encoder(nn.Module):
                     padding_mode,
                     cumulative_delay=net[-2 if norm is not None else -1].cumulative_delay,
                     depth=1,
-                    boom=boom
+                    boom=boom,
+                    script=script
                 ))
             net.append(maybe_wn(
                 cc.Conv1d(
@@ -389,7 +390,7 @@ class Encoder(nn.Module):
                     cumulative_delay=net[-1].cumulative_delay,
                 )))
             
-        net.append(nn.LeakyReLU(0.2))
+        net.append(nn.LeakyReLU(0.2)) 
 
         net.append(maybe_wn(
             cc.Conv1d(
@@ -402,7 +403,7 @@ class Encoder(nn.Module):
                 cumulative_delay=net[-2].cumulative_delay,
             )))
 
-        self.net = maybe_script(cc.CachedSequential(*net))
+        self.net = cc.CachedSequential(*net)
         self.cumulative_delay = self.net.cumulative_delay
         
     def forward(self, x, double:bool=False):
@@ -1107,7 +1108,8 @@ class RAVE(pl.LightningModule):
             x = self.pqmf(x)
             target = self.pqmf(target)
 
-        mean, scale = self.split_params(self.encoder(x))
+        p = self.encoder(x)
+        mean, scale = self.split_params(p)
 
         if loader_idx > 0:
             # z = mean

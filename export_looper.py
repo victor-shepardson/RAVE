@@ -300,7 +300,7 @@ RUN = search_for_run(args.RUN)
 logging.info(f"using {RUN}")
 
 # debug_kw = {}
-debug_kw = {'script':False, 'cropped_latent_size':24, 'latent_size':128} ###DEBUG
+debug_kw = {'script':False, 'cropped_latent_size':30, 'latent_size':128} ###DEBUG
 # debug_kw = {'cropped_latent_size':8, 'latent_size':128} ###DEBUG
 
 model = RAVE.load_from_checkpoint(RUN, **debug_kw, strict=False).eval()

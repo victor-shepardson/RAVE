@@ -21,6 +21,7 @@ from rave.weight_norm import remove_weight_norm
 from effortless_config import Config
 
 class args(Config):
+    TEST = True
     RUN = None
     # audio sample rate -- the exported model will convert to/from
     # the RAVE model sample rate
@@ -49,15 +50,20 @@ logging.basicConfig(
     format=colored("[%(relativeCreated).2f] ", "green") +
     "%(message)s")
 
-
 class LivingLooper(nn.Module):
+    trained_cropped:bool
+    sampling_rate:int
+    block_size:int
+    n_memory:int
+
     loop_index:int
     record_index:int
-    n_memory:int
-    loop_length:int
-    block_size:int
-    sampling_rate:int
-    trained_cropped:bool
+    step:int
+
+    latency_correct:int
+
+    loop_length:List[int]
+    loop_end_step:List[int]
 
     # has_model:List[bool]
 
@@ -71,6 +77,11 @@ class LivingLooper(nn.Module):
         self.n_loops = n_loops
         self.n_context = n_context
         self.n_memory = n_memory
+
+        self.latency_correct = 4
+
+        self.loop_end_step = [0]*n_loops
+        self.loop_length = [0]*n_loops
 
         self.block_size = model.block_size()
         self.sampling_rate = model.hparams['sr']
@@ -102,19 +113,29 @@ class LivingLooper(nn.Module):
             torch.empty(self.n_loops, 
                 requires_grad=False))
 
+        # continuously updated last N frames of memory
         self.register_buffer('memory', 
             torch.empty(n_memory, n_loops, self.n_latent,
+                requires_grad=False))
+        # long-term memory stored at record-end
+        self.register_buffer('loop_memory', 
+            torch.empty(n_loops, n_memory, n_loops, self.n_latent,
                 requires_grad=False))
 
         self.reset()
 
     @torch.jit.export
     def reset(self):
+        self.step = 0
         self.loop_index = -1
         self.record_index = 0
-        self.loop_length = 0
+
+        for i in range(self.n_loops):
+            self.loop_length[i] = 0
+            self.loop_end_step[i] = 0
 
         self.memory.zero_()
+        self.loop_memory.zero_()
         self.mask.zero_()
         self.weights.zero_()
         self.bias.zero_()
@@ -128,30 +149,52 @@ class LivingLooper(nn.Module):
         Returns:
             Tensor[loop, sample]
         """
+        self.step += 1
         # return self.decode(self.encode(x)) ### DEBUG
 
         z = self.encode(x) # always encode for cache, even if result is not used
 
+        if i > self.n_loops:
+            i = 0
         i = i-1 # convert to zero index loop / negative for no loop
         zs = torch.empty(self.n_loops, self.n_latent)
 
-        if i!=self.loop_index: # change in loop select control
-            if self.loop_index >= 0: # previously on a loop
-                if self.loop_length > self.n_context: # and it was long enough
+        i_prev = self.loop_index
+        # print(i, i_prev, self.loop_length)
+        if i!=i_prev: # change in loop select control
+            if i_prev >= 0: # previously on a loop
+                if self.loop_length[i_prev] >= self.n_context: # and it was long enough
                     # finalize loop
-                    mem = self.get_frames(self.loop_length)
+                    ll = self.loop_length[i_prev] = min(
+                        self.n_memory, self.loop_length[i_prev])
+                    mem = self.get_frames(ll)
+
+                    # train mem should be 
+                    # .... ........
+                    # 5678|12345678
+                    # .... ........
+                    # i.e. wrap the final n_context around
+                    train_mem = torch.cat((mem[-self.n_context:], mem),0)
+
+                    # valid_mem = mem[self.n_context:]
                     # print(mem.shape)
                     # dataset of features, targets
-                    features = mem.unfold(0, self.n_context, 1)[:-1] # time' x loop x latent x ctx
+                    features = train_mem.unfold(0, self.n_context, 1)[:-1] # time' x loop x latent x ctx
                     features = features.reshape(features.shape[0], -1)
-                    targets = mem[self.n_context:,self.loop_index,:] # time' x 1 x latent
+                    targets = train_mem[self.n_context:,self.loop_index,:] # time' x 1 x latent
                     # assert targets.shape[0]==features.shape[0], f"""
                         # {targets.shape=}, {features.shape=}
                         # """
+                    # make a copy of memory at the time of loop fitting
+                    loop_mem = mem
+                    # loop_mem = mem[self.n_context-self.latency_correct:-self.latency_correct]
+                    self.loop_memory[i_prev, :loop_mem.shape[0]] = mem
                     # targets = targets.view(targets.shape[0], -1)
-                    self.fit_loop(self.loop_index, features, targets)
+                    print(f'fit {i_prev+1}')
+                    self.fit_loop(i_prev, features, targets)
+                    self.loop_end_step[i_prev] = self.step
             if i>=0: # starting a new loop recording
-                self.loop_length = 0
+                self.loop_length[i] = 0
                 self.mask[i] = 0
             self.loop_index = i
                 
@@ -175,7 +218,7 @@ class LivingLooper(nn.Module):
         # update memory
         self.record_frame(zs)
         if self.loop_index >= 0:
-            self.loop_length += 1
+            self.loop_length[i] += 1
 
         y = self.decode(zs[...,None]) # add time dim
 
@@ -218,7 +261,8 @@ class LivingLooper(nn.Module):
             begin2 = max(0, begin)
             block2 = self.memory[begin2:self.record_index+1]
             return torch.cat((block1, block2))
-        return self.memory[begin:self.record_index+1]
+        else:
+            return self.memory[begin:self.record_index+1]
 
     def encode(self, x):
         """
@@ -272,9 +316,13 @@ class LivingLooper(nn.Module):
         b = y.mean(0)
         self.bias[i, :] = b
 
-        w = torch.linalg.lstsq(x, y-b).solution
+        y = y-b
+
+
+        w = torch.linalg.lstsq(x, y).solution
         self.weights[i, :] = w
 
+        print(x.shape, y.shape, w.shape)
         # print(x.norm(), y.norm(), w.norm())
         # print(y)
 
@@ -288,9 +336,29 @@ class LivingLooper(nn.Module):
         Returns:
             y: Tensor[batch, target]
         """
-        y = self.feat_process(i, x) @ self.weights[i] + self.bias[i]
-        y = y.abs().pow(1/2) * y.sign()
-        return y
+        # loop_len = min(self.n_memory, self.loop_length[i])
+        loop_len = self.loop_length[i]
+        # print(i, loop_len, self.mask[i])
+        if loop_len > 0:
+            j = (self.step - self.loop_end_step[i] + self.latency_correct) % loop_len
+            # j = (self.step - self.loop_end_step[i]) % loop_len
+            loop_z = self.loop_memory[i, j, i]
+        else:
+            j = 0
+            loop_z = torch.zeros(self.n_latent)
+
+        # if j < self.n_context:
+            # return loop_z
+
+        z = self.feat_process(i, x) @ self.weights[i] + self.bias[i]
+        z = z.abs().pow(1/2) * z.sign()
+
+        # return z
+        # mix = float(j)/(loop_len-1)
+        mix = 1
+        # mix = min(1, (self.step - self.loop_end_step[i])/self.n_context)
+
+        return z*mix + loop_z*(1-mix)
 
               
 
@@ -352,15 +420,17 @@ def smoke_test():
     feed(0)
     for _ in range(10):
         feed(1)
-    for _ in range(10):
+    for _ in range(args.CONTEXT+1):
         feed(2)
     for _ in range(10):
         feed(0)
-    for _ in range(10):
+    for _ in range(args.MEMORY+1):
         feed(3)
+    feed(0)
 
 logging.info("smoke test with pytorch")
-smoke_test()
+if args.TEST:
+    smoke_test()
 
 looper.reset()
 
@@ -368,7 +438,8 @@ logging.info("compiling torchscript")
 looper = torch.jit.script(looper)
 
 logging.info("smoke test with torchscript")
-smoke_test()
+if args.TEST:
+    smoke_test()
 
 fname = f"ll_{args.NAME}.ts"
 logging.info(f"saving '{fname}'")

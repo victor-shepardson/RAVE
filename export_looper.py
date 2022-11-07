@@ -21,20 +21,23 @@ from rave.weight_norm import remove_weight_norm
 from effortless_config import Config
 
 class args(Config):
-    TEST = True
+    # run smoke tests before exporting
+    TEST = 1
+    # model checkpoint path
     RUN = None
-    # audio sample rate -- the exported model will convert to/from
-    # the RAVE model sample rate
+    # audio sample rate -- currently must match RAVE model
     SR = None
     # should be true for realtime
     CACHED = True
     # number of latents to preserve from RAVE model
     LATENT_SIZE = None
-    # predictive context
-    CONTEXT = 3
+    # maximum predictive context size
+    CONTEXT = 24
+    # maximum number of frames to fit model on
+    FIT = 200
     # number of loops
     LOOPS = 3
-    # max memory size
+    # max frames for loop memory
     MEMORY = 1000
     # included in output filename
     NAME = "test"
@@ -64,24 +67,33 @@ class LivingLooper(nn.Module):
 
     loop_length:List[int]
     loop_end_step:List[int]
+    loop_context:List[int]
 
     # has_model:List[bool]
 
+    def n_feature(self, n_context):
+         return self.n_loops * n_context * self.n_latent
+
     def __init__(self, 
             rave_model:RAVE, 
-            n_loops:int, n_context:int, n_memory:int, 
-            n_latent:Optional[int] = None
+            n_loops:int, 
+            n_context:int, # maximum time dimension of model feature
+            n_memory:int, # maximum loop memory 
+            n_fit:int, # maximum dataset size to fit
             ):
         super().__init__()
 
         self.n_loops = n_loops
-        self.n_context = n_context
+        self.max_n_context = n_context # now a maximum
         self.n_memory = n_memory
+        self.n_fit = n_fit
 
         self.latency_correct = 4
+        self.min_loop = 2
 
         self.loop_end_step = [0]*n_loops
         self.loop_length = [0]*n_loops
+        self.loop_context = [self.max_n_context]*n_loops
 
         self.block_size = model.block_size()
         self.sampling_rate = model.hparams['sr']
@@ -92,7 +104,7 @@ class LivingLooper(nn.Module):
             if self.trained_cropped 
             else rave_model.latent_size)
 
-        self.n_feature = self.n_loops * self.n_context * self.n_latent
+        self.max_n_feature = self.n_feature(self.max_n_context)
 
         self.pqmf = rave_model.pqmf
         self.encoder = rave_model.encoder
@@ -100,10 +112,10 @@ class LivingLooper(nn.Module):
         self.n_latent_decoder = rave_model.latent_size
 
         self.register_buffer('weights', 
-            torch.empty(self.n_loops, self.n_feature, self.n_latent, 
+            torch.empty(self.n_loops, self.max_n_feature, self.n_latent, 
                 requires_grad=False))
         self.register_buffer('center', 
-            torch.empty(self.n_loops, self.n_feature, 
+            torch.empty(self.n_loops, self.max_n_feature, 
                 requires_grad=False))
         self.register_buffer('bias', 
             torch.empty(self.n_loops, self.n_latent, 
@@ -163,39 +175,41 @@ class LivingLooper(nn.Module):
         # print(i, i_prev, self.loop_length)
         if i!=i_prev: # change in loop select control
             if i_prev >= 0: # previously on a loop
-                if self.loop_length[i_prev] >= self.n_context: # and it was long enough
+                if self.loop_length[i_prev] >= self.min_loop: # and it was long enough
                     # finalize loop
                     ll = self.loop_length[i_prev] = min(
                         self.n_memory, self.loop_length[i_prev])
                     mem = self.get_frames(ll)
 
+                    lc = self.loop_context[i_prev] = min(
+                        self.max_n_context, ll//2)
                     # train mem should be 
                     # .... ........
                     # 5678|12345678
                     # .... ........
                     # i.e. wrap the final n_context around
-                    train_mem = torch.cat((mem[-self.n_context:], mem),0)
+                    train_mem = torch.cat((mem[-lc:], mem),0)[:self.n_fit+lc]
 
                     # valid_mem = mem[self.n_context:]
                     # print(mem.shape)
                     # dataset of features, targets
-                    features = train_mem.unfold(0, self.n_context, 1)[:-1] # time' x loop x latent x ctx
+                    features = train_mem.unfold(0, lc, 1)[:-1] # time' x loop x latent x ctx
                     features = features.reshape(features.shape[0], -1)
-                    targets = train_mem[self.n_context:,self.loop_index,:] # time' x 1 x latent
+                    targets = train_mem[lc:,self.loop_index,:] # time' x 1 x latent
                     # assert targets.shape[0]==features.shape[0], f"""
                         # {targets.shape=}, {features.shape=}
                         # """
                     # make a copy of memory at the time of loop fitting
                     loop_mem = mem
                     # loop_mem = mem[self.n_context-self.latency_correct:-self.latency_correct]
-                    self.loop_memory[i_prev, :loop_mem.shape[0]] = mem
+                    self.loop_memory[i_prev, :loop_mem.shape[0]] = loop_mem
                     # targets = targets.view(targets.shape[0], -1)
                     print(f'fit {i_prev+1}')
                     self.fit_loop(i_prev, features, targets)
                     self.loop_end_step[i_prev] = self.step
             if i>=0: # starting a new loop recording
                 self.loop_length[i] = 0
-                self.mask[i] = 0
+                # self.mask[i] = 0
             self.loop_index = i
                 
         if i>=0:
@@ -204,9 +218,8 @@ class LivingLooper(nn.Module):
             zs[i:i+1] = z[...,0] # remove time dim
 
         # predictive context (same for all loops right now)
-        feature = self.get_frames(self.n_context) # ctx x loop x latent
+        feature = self.get_frames(self.max_n_context) # ctx x loop x latent
         # print(f'{feature.shape=}')
-        feature = feature.permute(1,2,0).reshape(1,-1) # 1 x feature
         for j in range(self.n_loops):
             if i==j: continue
             # predict from a single feature
@@ -292,73 +305,82 @@ class LivingLooper(nn.Module):
         return x
 
     def feat_process(self, i:int, x):
-        return ((x - self.center[i])/2).tanh()
+        return ((x - self.center[i, :x.shape[1]])/2).tanh()
 
-    def fit_loop(self, i:int, x, y):
+    def fit_loop(self, i:int, feature, z):
         """
         Args:
             i: index of loop
-            x: Tensor[batch, feature]
-            y: Tensor[batch, target]
+            feature: Tensor[batch, feature]
+            z: Tensor[batch, target]
         Returns:
 
         """
-        x = x.view(x.shape[0], -1)
-        y = y.view(y.shape[0], -1)
+        feature = feature.view(feature.shape[0], -1)
+        n_feature = feature.shape[1]
+
+        z = z.view(z.shape[0], -1)
         
-        y = y.abs().pow(2) * y.sign()
+        # z = z.abs().pow(2) * z.sign()
+        z = torch.where(
+            z > 1, ((z+1)/2)**2, torch.where(
+                z < -1, -((1-z)/2)**2, z))
 
-        c = x.mean(0)
-        self.center[i, :] = c
+        c = feature.mean(0)
+        self.center[i, :n_feature] = c
 
-        x = self.feat_process(i, x)
+        feature = self.feat_process(i, feature)
 
-        b = y.mean(0)
+        b = z.mean(0)
         self.bias[i, :] = b
 
-        y = y-b
+        z = z-b
 
+        w = torch.linalg.lstsq(feature, z).solution
+        self.weights[i, :n_feature] = w
 
-        w = torch.linalg.lstsq(x, y).solution
-        self.weights[i, :] = w
-
-        print(x.shape, y.shape, w.shape)
+        print(feature.shape, z.shape, w.shape)
         # print(x.norm(), y.norm(), w.norm())
         # print(y)
 
         self.mask[i] = 1.
 
-    def eval_loop(self, i:int, x):
+    def eval_loop(self, i:int, feature):
         """
         Args:
             i: index of loop
-            x: Tensor[batch, feature]
+            feature: Tensor[context, loop, latent]
         Returns:
-            y: Tensor[batch, target]
+            Tensor[batch, target]
         """
-        # loop_len = min(self.n_memory, self.loop_length[i])
-        loop_len = self.loop_length[i]
-        # print(i, loop_len, self.mask[i])
-        if loop_len > 0:
-            j = (self.step - self.loop_end_step[i] + self.latency_correct) % loop_len
-            # j = (self.step - self.loop_end_step[i]) % loop_len
-            loop_z = self.loop_memory[i, j, i]
-        else:
-            j = 0
-            loop_z = torch.zeros(self.n_latent)
+        ll = self.loop_length[i]
+        lc = self.loop_context[i]
+        feature = feature[-lc:].permute(1,2,0).reshape(1,-1) # 1 x feature
+        n_feature = feature.numel()
 
-        # if j < self.n_context:
-            # return loop_z
+        # # print(i, loop_len, self.mask[i])
+        # if ll > 0:
+        #     j = (self.step - self.loop_end_step[i] + self.latency_correct) % ll
+        #     # j = (self.step - self.loop_end_step[i]) % ll
+        #     loop_z = self.loop_memory[i, j, i]
+        # else:
+        #     j = 0
+        #     loop_z = torch.zeros(self.n_latent)
+        # # if j < self.n_context:
+        #     # return loop_z
 
-        z = self.feat_process(i, x) @ self.weights[i] + self.bias[i]
-        z = z.abs().pow(1/2) * z.sign()
+        z = self.feat_process(i, feature) @ self.weights[i,:n_feature] + self.bias[i]
+        # z = z.abs().pow(1/2) * z.sign()
+        z = torch.where(
+            z > 1, 2*z**0.5 - 1, torch.where(
+                z < -1, 1 - 2*(-z)**0.5, z))
 
-        # return z
-        # mix = float(j)/(loop_len-1)
-        mix = 1
-        # mix = min(1, (self.step - self.loop_end_step[i])/self.n_context)
+        return z
+        # # mix = float(j)/(loop_len-1)
+        # mix = 1
+        # # mix = min(1, (self.step - self.loop_end_step[i])/self.n_context)
 
-        return z*mix + loop_z*(1-mix)
+        # return z*mix + loop_z*(1-mix)
 
               
 
@@ -368,7 +390,7 @@ RUN = search_for_run(args.RUN)
 logging.info(f"using {RUN}")
 
 # debug_kw = {}
-debug_kw = {'script':False, 'cropped_latent_size':30, 'latent_size':128} ###DEBUG
+debug_kw = {'script':False}#, 'cropped_latent_size':36, 'latent_size':128} ###DEBUG
 # debug_kw = {'cropped_latent_size':8, 'latent_size':128} ###DEBUG
 
 model = RAVE.load_from_checkpoint(RUN, **debug_kw, strict=False).eval()
@@ -406,8 +428,8 @@ sr = model.sr
 assert int(args.SR) == sr, f"model sample rate is {sr}"
 
 logging.info("creating looper")
-ls = None if args.LATENT_SIZE is None else int(args.LATENT_SIZE)
-looper = LivingLooper(model, args.LOOPS, args.CONTEXT, args.MEMORY, ls)
+# ls = None if args.LATENT_SIZE is None else int(args.LATENT_SIZE)
+looper = LivingLooper(model, args.LOOPS, args.CONTEXT, args.MEMORY, args.FIT)
 looper.eval()
 
 # smoke test
@@ -420,16 +442,18 @@ def smoke_test():
     feed(0)
     for _ in range(10):
         feed(1)
-    for _ in range(args.CONTEXT+1):
+    for _ in range(args.CONTEXT+3):
         feed(2)
     for _ in range(10):
         feed(0)
-    for _ in range(args.MEMORY+1):
+
+    if args.TEST <= 1: return
+    for _ in range(args.MEMORY+3):
         feed(3)
     feed(0)
 
 logging.info("smoke test with pytorch")
-if args.TEST:
+if args.TEST > 0:
     smoke_test()
 
 looper.reset()
@@ -438,7 +462,7 @@ logging.info("compiling torchscript")
 looper = torch.jit.script(looper)
 
 logging.info("smoke test with torchscript")
-if args.TEST:
+if args.TEST > 0:
     smoke_test()
 
 fname = f"ll_{args.NAME}.ts"

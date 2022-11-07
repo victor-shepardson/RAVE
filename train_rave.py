@@ -54,9 +54,9 @@ if __name__ == "__main__":
         )
         # reduction in data dim in encoder / increase (reversed) in generator
         NARROW = setting(
-            default=[2, 2, 2, 1],
-            small=[2, 2, 2, 1],
-            large=[2, 2, 2, 1, 1],
+            default=[1, 2, 2, 2],
+            small=[1, 2, 2, 2],
+            large=[1, 1, 2, 2, 2],
         )
         #low and high values for the cyclic beta-VAE objective
         MIN_KL = 1e-1

@@ -53,7 +53,143 @@ logging.basicConfig(
     format=colored("[%(relativeCreated).2f] ", "green") +
     "%(message)s")
 
+class Loop(nn.Module):
+    length:int
+    end_step:int
+    context:int
+
+    def __init__(self, 
+            index:int,
+            n_loops:int,
+            n_context:int, # maximum time dimension of model feature
+            n_memory:int, # maximum loop memory 
+            n_fit:int, # maximum dataset size to fit
+            n_latent:int
+            ):
+
+        self.index = index
+        self.max_n_context = n_context # now a maximum
+        self.n_memory = n_memory
+        self.n_fit = n_fit
+        self.n_latent = n_latent
+
+        max_n_feature = n_loops * n_context * n_latent
+
+        super().__init__()
+
+        self.register_buffer('weights', 
+            torch.empty(max_n_feature, n_latent, requires_grad=False))
+        self.register_buffer('center', 
+            torch.empty(max_n_feature, requires_grad=False))
+        self.register_buffer('bias', 
+            torch.empty(n_latent, requires_grad=False))
+
+        # long-term memory stored at record-end
+        self.register_buffer('memory', 
+            torch.empty(n_memory, n_loops, n_latent, requires_grad=False))
+
+    def reset(self):
+        self.end_step = 0
+        self.length = 0
+        self.context = 0
+
+        self.memory.zero_()
+        self.weights.zero_()
+        self.bias.zero_()
+        self.center.zero_()
+
+    def feat_process(self, x, fit:bool=False):
+        if fit:
+            c = self.center[:x.shape[1]] = x.mean(0)
+        else:
+            c = self.center[:x.shape[1]]
+        return ((x - c)/2).tanh()
+
+    def target_process(self, z):
+        return torch.where(
+            z > 1, ((z+1)/2)**2, torch.where(
+                z < -1, -((1-z)/2)**2, z))
+
+    def target_process_inv(self, z):
+        return torch.where(
+            z > 1, 2*z**0.5 - 1, torch.where(
+                z < -1, 1 - 2*(-z)**0.5, z))
+
+    def store(self, memory, step):
+        """
+        Args:
+            memory: Tensor[time, loop, latent]
+            step: int
+        """
+        self.length = memory.shape[0]
+        self.end_step = step
+        self.memory[:self.length] = memory
+
+    def fit(self, feature, z):
+        """
+        Args:
+            feature: Tensor[batch, context, loop, latent]
+            z: Tensor[batch, latent]
+        """
+        self.context = feature.shape[3]
+
+        feature = feature.view(feature.shape[0], -1)
+        n_feature = feature.shape[1]
+        
+        z = self.target_process(z)
+
+        feature = self.feat_process(feature, fit=True)
+
+        b = z.mean(0)
+        self.bias[:] = b
+
+        w = torch.linalg.lstsq(feature, z-b).solution
+        self.weights[:n_feature] = w
+
+        print(feature.shape, z.shape, w.shape)
+        # print(x.norm(), y.norm(), w.norm())
+        # print(y)
+
+    def eval(self, feature):# step:int, i:int
+        """
+        Args:
+            feature: Tensor[context, loop, latent]
+        Returns:
+            Tensor[batch, target]
+        """
+        feature = feature[-self.context:].reshape(1,-1) 
+        # 1 x (loop,latent,ctx)
+        fs = feature.shape[1]
+        w, b = self.weights[:fs], self.bias
+
+        z = self.feat_process(feature) @ w + b
+
+        z = self.target_process_inv(z)
+
+        return z
+
+    def read(self, step:int):
+        if self.length > 0:
+            j = (step - self.end_step + self.latency_correct) % self.length
+            z = self.memory[j, self.index]
+        else:
+            j = 0
+            z = torch.zeros(self.n_latent)
+
+        return z
+        # if j < self.n_context:
+            # return loop_z
+
+        # # mix = float(j)/(loop_len-1)
+        # mix = 1
+        # # mix = min(1, (self.step - self.loop_end_step[i])/self.n_context)
+
+        # return z*mix + loop_z*(1-mix)
+
+
 class LivingLooper(nn.Module):
+    __constants__ = ['loops']
+
     trained_cropped:bool
     sampling_rate:int
     block_size:int
@@ -62,17 +198,9 @@ class LivingLooper(nn.Module):
     loop_index:int
     record_index:int
     step:int
+    record_length:int
 
     latency_correct:int
-
-    loop_length:List[int]
-    loop_end_step:List[int]
-    loop_context:List[int]
-
-    # has_model:List[bool]
-
-    def n_feature(self, n_context):
-         return self.n_loops * n_context * self.n_latent
 
     def __init__(self, 
             rave_model:RAVE, 
@@ -91,10 +219,6 @@ class LivingLooper(nn.Module):
         self.latency_correct = 4
         self.min_loop = 2
 
-        self.loop_end_step = [0]*n_loops
-        self.loop_length = [0]*n_loops
-        self.loop_context = [self.max_n_context]*n_loops
-
         self.block_size = model.block_size()
         self.sampling_rate = model.hparams['sr']
 
@@ -104,54 +228,36 @@ class LivingLooper(nn.Module):
             if self.trained_cropped 
             else rave_model.latent_size)
 
-        self.max_n_feature = self.n_feature(self.max_n_context)
+        self.loops = nn.ModuleList(Loop(
+            i, n_loops, n_context, n_memory, n_fit, self.n_latent
+        ) for i in range(n_loops))
 
         self.pqmf = rave_model.pqmf
         self.encoder = rave_model.encoder
         self.decoder = rave_model.decoder
         self.n_latent_decoder = rave_model.latent_size
 
-        self.register_buffer('weights', 
-            torch.empty(self.n_loops, self.max_n_feature, self.n_latent, 
-                requires_grad=False))
-        self.register_buffer('center', 
-            torch.empty(self.n_loops, self.max_n_feature, 
-                requires_grad=False))
-        self.register_buffer('bias', 
-            torch.empty(self.n_loops, self.n_latent, 
-                requires_grad=False))
-
-        self.register_buffer('mask', 
-            torch.empty(self.n_loops, 
-                requires_grad=False))
-
         # continuously updated last N frames of memory
         self.register_buffer('memory', 
-            torch.empty(n_memory, n_loops, self.n_latent,
-                requires_grad=False))
-        # long-term memory stored at record-end
-        self.register_buffer('loop_memory', 
-            torch.empty(n_loops, n_memory, n_loops, self.n_latent,
-                requires_grad=False))
+            torch.empty(n_memory, n_loops, self.n_latent, requires_grad=False))
+
+        self.register_buffer('mask', 
+            torch.empty(n_loops, requires_grad=False))
 
         self.reset()
 
     @torch.jit.export
     def reset(self):
+        self.record_length = 0
         self.step = 0
         self.loop_index = -1
         self.record_index = 0
 
-        for i in range(self.n_loops):
-            self.loop_length[i] = 0
-            self.loop_end_step[i] = 0
+        for l in self.loops:
+            l.reset()
 
         self.memory.zero_()
-        self.loop_memory.zero_()
         self.mask.zero_()
-        self.weights.zero_()
-        self.bias.zero_()
-        self.center.zero_()
 
     def forward(self, i:int, x):
         """
@@ -175,41 +281,10 @@ class LivingLooper(nn.Module):
         # print(i, i_prev, self.loop_length)
         if i!=i_prev: # change in loop select control
             if i_prev >= 0: # previously on a loop
-                if self.loop_length[i_prev] >= self.min_loop: # and it was long enough
-                    # finalize loop
-                    ll = self.loop_length[i_prev] = min(
-                        self.n_memory, self.loop_length[i_prev])
-                    mem = self.get_frames(ll)
-
-                    lc = self.loop_context[i_prev] = min(
-                        self.max_n_context, ll//2)
-                    # train mem should be 
-                    # .... ........
-                    # 5678|12345678
-                    # .... ........
-                    # i.e. wrap the final n_context around
-                    train_mem = torch.cat((mem[-lc:], mem),0)[:self.n_fit+lc]
-
-                    # valid_mem = mem[self.n_context:]
-                    # print(mem.shape)
-                    # dataset of features, targets
-                    features = train_mem.unfold(0, lc, 1)[:-1] # time' x loop x latent x ctx
-                    features = features.reshape(features.shape[0], -1)
-                    targets = train_mem[lc:,self.loop_index,:] # time' x 1 x latent
-                    # assert targets.shape[0]==features.shape[0], f"""
-                        # {targets.shape=}, {features.shape=}
-                        # """
-                    # make a copy of memory at the time of loop fitting
-                    loop_mem = mem
-                    # loop_mem = mem[self.n_context-self.latency_correct:-self.latency_correct]
-                    self.loop_memory[i_prev, :loop_mem.shape[0]] = loop_mem
-                    # targets = targets.view(targets.shape[0], -1)
-                    print(f'fit {i_prev+1}')
-                    self.fit_loop(i_prev, features, targets)
-                    self.loop_end_step[i_prev] = self.step
+                if self.record_length >= self.min_loop: # and it was long enough
+                    self.fit_loop(i_prev)
             if i>=0: # starting a new loop recording
-                self.loop_length[i] = 0
-                # self.mask[i] = 0
+                self.record_length = 0
             self.loop_index = i
                 
         if i>=0:
@@ -224,24 +299,24 @@ class LivingLooper(nn.Module):
             if i==j: continue
             # predict from a single feature
             # slice on LHS to appease torchscript
-            zs[j:j+1] = self.eval_loop(j, feature)
-
-        # print([f'{z.shape}' for z in zs])
+            # loop = self.get_loop(j)
+            # if loop is not None:
+            # weird lacuna in torchscript: can only index ModuleList with literal
+            for k,loop in enumerate(self.loops): 
+                if k==j:
+                    zs[j:j+1] = loop.eval(feature)
+            # zs[j:j+1] = self.loops[j].eval(feature)
 
         # update memory
         self.record_frame(zs)
-        if self.loop_index >= 0:
-            self.loop_length[i] += 1
+        # if self.loop_index >= 0:
+        self.record_length += 1
 
         y = self.decode(zs[...,None]) # add time dim
 
-        # this seems to have been causing some kind of memory fragmentation or leak?
-        # mask = torch.cat(
-        #     [torch.ones(1,1,1) if i==j or b else torch.zeros(1,1,1) 
-        #     for j,b in enumerate(self.has_model)])
-        # y = y * mask
-
         y = y * self.mask[:,None,None]
+
+        return y
 
         # print(f'{self.loop_length}, {self.record_index}, {self.loop_index}')
 
@@ -251,7 +326,35 @@ class LivingLooper(nn.Module):
         #     (torch.arange(0,self.block_size)/128*2*np.pi).sin()/3 
         # ))[:,None]
 
-        return y
+    # def get_loop(self, i:int) -> Optional[Loop]:
+    #     for j,loop in enumerate(self.loops):
+    #         if i==j: return loop
+    #     return None
+
+    def fit_loop(self, i:int):
+        # work around weird lacuna of torchscript
+        # (can't index ModuleList except with literal)
+        for j,loop in enumerate(self.loops): 
+            if i==j:
+            # loop = self.get_loop(i)
+            # if loop is not None:
+        # loop = self.loops[i]
+                ll = min(self.n_memory, self.record_length)
+                lc = min(self.max_n_context, ll//2)
+
+                mem = self.get_frames(ll)
+                # wrap the final n_context around
+                # TODO: wrap target loop but not others?
+                train_mem = torch.cat((mem[-lc:], mem),0)[:self.n_fit+lc]
+
+                # dataset of features, targets
+                features = train_mem.unfold(0, lc, 1)[:-1].permute(0,3,1,2) # batch x loop x latent x ctx
+                targets = train_mem[lc:,self.loop_index,:] # batch x latent
+                # loop.store(mem, self.step) # NOTE: disabled
+
+                print(f'fit {i+1}')
+                loop.fit(features, targets)
+                self.mask[i] = 1.
 
 
     def record_frame(self, zs):
@@ -303,84 +406,6 @@ class LivingLooper(nn.Module):
             x = self.pqmf.inverse(x)
 
         return x
-
-    def feat_process(self, i:int, x):
-        return ((x - self.center[i, :x.shape[1]])/2).tanh()
-
-    def fit_loop(self, i:int, feature, z):
-        """
-        Args:
-            i: index of loop
-            feature: Tensor[batch, feature]
-            z: Tensor[batch, target]
-        Returns:
-
-        """
-        feature = feature.view(feature.shape[0], -1)
-        n_feature = feature.shape[1]
-
-        z = z.view(z.shape[0], -1)
-        
-        # z = z.abs().pow(2) * z.sign()
-        z = torch.where(
-            z > 1, ((z+1)/2)**2, torch.where(
-                z < -1, -((1-z)/2)**2, z))
-
-        c = feature.mean(0)
-        self.center[i, :n_feature] = c
-
-        feature = self.feat_process(i, feature)
-
-        b = z.mean(0)
-        self.bias[i, :] = b
-
-        z = z-b
-
-        w = torch.linalg.lstsq(feature, z).solution
-        self.weights[i, :n_feature] = w
-
-        print(feature.shape, z.shape, w.shape)
-        # print(x.norm(), y.norm(), w.norm())
-        # print(y)
-
-        self.mask[i] = 1.
-
-    def eval_loop(self, i:int, feature):
-        """
-        Args:
-            i: index of loop
-            feature: Tensor[context, loop, latent]
-        Returns:
-            Tensor[batch, target]
-        """
-        ll = self.loop_length[i]
-        lc = self.loop_context[i]
-        feature = feature[-lc:].permute(1,2,0).reshape(1,-1) # 1 x feature
-        n_feature = feature.numel()
-
-        # # print(i, loop_len, self.mask[i])
-        # if ll > 0:
-        #     j = (self.step - self.loop_end_step[i] + self.latency_correct) % ll
-        #     # j = (self.step - self.loop_end_step[i]) % ll
-        #     loop_z = self.loop_memory[i, j, i]
-        # else:
-        #     j = 0
-        #     loop_z = torch.zeros(self.n_latent)
-        # # if j < self.n_context:
-        #     # return loop_z
-
-        z = self.feat_process(i, feature) @ self.weights[i,:n_feature] + self.bias[i]
-        # z = z.abs().pow(1/2) * z.sign()
-        z = torch.where(
-            z > 1, 2*z**0.5 - 1, torch.where(
-                z < -1, 1 - 2*(-z)**0.5, z))
-
-        return z
-        # # mix = float(j)/(loop_len-1)
-        # mix = 1
-        # # mix = min(1, (self.step - self.loop_end_step[i])/self.n_context)
-
-        # return z*mix + loop_z*(1-mix)
 
               
 

@@ -34,13 +34,13 @@ class args(Config):
     # maximum predictive context size
     CONTEXT = 24
     # maximum number of frames to fit model on
-    FIT = 200
+    FIT = 150
     # number of loops
-    LOOPS = 3
+    LOOPS = 5
     # max frames for loop memory
     MEMORY = 1000
     # latency correction, latent frames
-    LATENCY_CORRECT = 4
+    LATENCY_CORRECT = 3
     # included in output filename
     NAME = "test"
 
@@ -138,6 +138,12 @@ class Loop(nn.Module):
             feature: Tensor[batch, context, loop, latent]
             z: Tensor[batch, latent]
         """
+        # print(torch.linalg.vector_norm(feature, dim=(1,2,3)))
+        # print(torch.linalg.vector_norm(feature, dim=(0,2,3)))
+        # print(torch.linalg.vector_norm(feature, dim=(0,1,3)))
+        # print(torch.linalg.vector_norm(feature, dim=(0,1,2)))
+
+
         self.context = feature.shape[1]
         assert feature.shape[2]==self.n_loops
         assert feature.shape[3]==self.n_latent
@@ -150,11 +156,22 @@ class Loop(nn.Module):
 
         feature = self.feat_process(feature, fit=True)
 
+        # feature = feature + torch.randn_like(feature)*1e-7
+
         b = z.mean(0)
         self.bias[:] = b
 
-        w = torch.linalg.lstsq(feature, z-b).solution
+        r = torch.linalg.lstsq(feature, z-b, driver='gelsd')
+        w = r.solution
         self.weights[:fs] = w
+
+        # print(torch.linalg.vector_norm(feature, dim=1))
+        print(w.norm())
+        print(torch.linalg.matrix_rank(feature))
+        print(r.rank)
+        # print(r.solution.shape, r.residuals, r.rank, r.singular_values)
+        # print(feature.shape, (z-b).shape)
+        # print(w.norm(), feature.norm(), (z-b).norm(), z-b)
 
 
     def eval(self, feature):
@@ -294,7 +311,7 @@ class LivingLooper(nn.Module):
         if i > self.n_loops:
             i = 0
         i = i-1 # convert to zero index loop / negative for no loop
-        zs = torch.empty(self.n_loops, self.n_latent)
+        # zs = torch.empty(self.n_loops, self.n_latent)
 
         i_prev = self.loop_index
         # print(i, i_prev, self.loop_length)
@@ -373,19 +390,11 @@ class LivingLooper(nn.Module):
         ctx = min(self.max_n_context, ll//2)
         lc = self.latency_correct
 
-        # drop the last lc frames
+        # drop the last lc frames -- there are no target values
         mem = self.get_frames(ll, lc)
         # wrap the final n_context around
         # TODO: wrap target loop but not others?
         train_mem = torch.cat((mem[-ctx:], mem),0)
-
-        # shift the context loops forward by latency_correct,
-        # put the target loop first
-        # target_loop = train_mem[:,i:i+1]
-        # others = torch.cat((
-            # train_mem[-lc:], train_mem[:-lc]), 0)
-        # train_mem = torch.cat((
-            # target_loop, others[:,:i], others[:,i+1:]), 1)
 
         # limit to last n_fit frames
         # train_mem = train_mem[:self.n_fit+ctx]
@@ -393,8 +402,7 @@ class LivingLooper(nn.Module):
 
         # dataset of features, targets
         features = train_mem.unfold(0, ctx, 1)[:-1] # batch, loop, latent, context
-        features = features.permute(0,3,1,2) # batch, context, loop, latent
-        # targets = train_mem[ctx:,0,:] # batch x latent
+        features = features.permute(0,3,1,2).contiguous() # batch, context, loop, latent
         targets = train_mem[ctx:,i,:] # batch x latent
 
         # work around weird lacuna of torchscript
@@ -405,7 +413,7 @@ class LivingLooper(nn.Module):
                 loop.fit(features, targets)
                 # rollout predictions to make up latency
                 for dt in range(lc,0,-1):
-                    mem = self.get_frames(self.max_n_context, dt)
+                    mem = self.get_frames(loop.context, dt)
                     z = loop.eval(mem)
                     self.record(z, j, dt-1)
                     
@@ -529,16 +537,16 @@ looper.eval()
 
 # smoke test
 def feed(i):
-    x = torch.zeros(1, 1, 2**11)
+    x = torch.rand(1, 1, 2**11)-0.5
     looper(i, x)
 
 def smoke_test():
     looper.reset()
     feed(0)
-    for _ in range(10):
-        feed(1)
-    for _ in range(args.CONTEXT+3):
+    for _ in range(31):
         feed(2)
+    for _ in range(args.CONTEXT+3):
+        feed(1)
     for _ in range(10):
         feed(0)
 
@@ -559,6 +567,8 @@ looper = torch.jit.script(looper)
 logging.info("smoke test with torchscript")
 if args.TEST > 0:
     smoke_test()
+
+looper.reset()
 
 fname = f"ll_{args.NAME}.ts"
 logging.info(f"saving '{fname}'")

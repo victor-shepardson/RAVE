@@ -162,7 +162,7 @@ class Loop(nn.Module):
         Args:
             feature: Tensor[context, loop, latent]
         Returns:
-            Tensor[batch, target]
+            Tensor[latent]
         """
         feature = feature[-self.context:].reshape(1,-1) 
         # 1 x (loop,latent,ctx)
@@ -173,7 +173,7 @@ class Loop(nn.Module):
 
         z = self.feat_process(feature) @ w + b
 
-        z = self.target_process_inv(z)
+        z = self.target_process_inv(z).squeeze(0)
 
         # TODO:
         # loop maintains the buffer of latency_correct
@@ -286,6 +286,7 @@ class LivingLooper(nn.Module):
             Tensor[loop, sample]
         """
         self.step += 1
+        lc = self.latency_correct
         # return self.decode(self.encode(x)) ### DEBUG
 
         z = self.encode(x) # always encode for cache, even if result is not used
@@ -306,34 +307,44 @@ class LivingLooper(nn.Module):
                 self.mask[1,i] = 0.
             self.loop_index = i
                 
+
+        # eval the other loops
+        mem = self.get_frames(self.max_n_context) # ctx x loop x latent
+
+        # advance record head
+        self.advance()
+
         # store encoded input to current loop
         if i>=0:
             # print(x.shape)
             # slice on LHS to appease torchscript
-            zs[i:i+1] = z[...,0] # remove time dim
-
-        # eval the other loops
-        mem = self.get_frames(self.max_n_context) # ctx x loop x latent
+            # zs[i:i+1] = z[...,0] # remove time dim
+            z_i = z[0,:,0] # remove batch, time dims
+            self.record(z_i, i, lc)
 
         # print(f'{feature.shape=}')
         for j,loop in enumerate(self.loops):
             # skip the loop which is now recording
             if i!=j:
                 # construct feature for current loop
-                feature = torch.cat((
-                    mem[:,j:j+1],
-                    mem[:,:j],
-                    mem[:,j+1:]
-                ), 1)
+                feature = mem
+                # feature = torch.cat((
+                #     mem[:,j:j+1],
+                #     mem[:,:j],
+                #     mem[:,j+1:]
+                # ), 1)
                 # slice on LHS to appease torchscript
-                zs[j:j+1] = loop.eval(feature)
+                # zs[j:j+1] = loop.eval(feature)
+                z_j = loop.eval(feature)
+                self.record(z_j, j, 0)
 
         # update memory
-        self.record_frame(zs)
+        # self.record_frame(zs)
         # if self.loop_index >= 0:
         self.record_length += 1
 
-        y = self.decode(zs[...,None]) # loops, channels (1), time
+        # y = self.decode(zs[...,None]) # loops, channels (1), time
+        y = self.decode(self.get_frames(1).permute(1,2,0)) # loops, channels (1), time
 
         fade = torch.linspace(0,1,y.shape[2])
         mask = self.mask[1,:,None,None] * fade + self.mask[0,:,None,None] * (1-fade)
@@ -362,18 +373,19 @@ class LivingLooper(nn.Module):
         ctx = min(self.max_n_context, ll//2)
         lc = self.latency_correct
 
-        mem = self.get_frames(ll)
+        # drop the last lc frames
+        mem = self.get_frames(ll, lc)
         # wrap the final n_context around
         # TODO: wrap target loop but not others?
         train_mem = torch.cat((mem[-ctx:], mem),0)
 
         # shift the context loops forward by latency_correct,
         # put the target loop first
-        target_loop = train_mem[:,i:i+1]
-        others = torch.cat((
-            train_mem[-lc:], train_mem[:-lc]), 0)
-        train_mem = torch.cat((
-            target_loop, others[:,:i], others[:,i+1:]), 1)
+        # target_loop = train_mem[:,i:i+1]
+        # others = torch.cat((
+            # train_mem[-lc:], train_mem[:-lc]), 0)
+        # train_mem = torch.cat((
+            # target_loop, others[:,:i], others[:,i+1:]), 1)
 
         # limit to last n_fit frames
         # train_mem = train_mem[:self.n_fit+ctx]
@@ -382,7 +394,8 @@ class LivingLooper(nn.Module):
         # dataset of features, targets
         features = train_mem.unfold(0, ctx, 1)[:-1] # batch, loop, latent, context
         features = features.permute(0,3,1,2) # batch, context, loop, latent
-        targets = train_mem[ctx:,0,:] # batch x latent
+        # targets = train_mem[ctx:,0,:] # batch x latent
+        targets = train_mem[ctx:,i,:] # batch x latent
 
         # work around weird lacuna of torchscript
         # (can't index ModuleList except with literal)
@@ -390,32 +403,49 @@ class LivingLooper(nn.Module):
             if i==j:
                 # loop.store(mem, self.step) # NOTE: disabled
                 loop.fit(features, targets)
+                # rollout predictions to make up latency
+                for dt in range(lc,0,-1):
+                    mem = self.get_frames(self.max_n_context, dt)
+                    z = loop.eval(mem)
+                    self.record(z, j, dt-1)
+                    
+        self.mask[1,i] = 1.
 
-        self.mask[i] = 1.
 
-
-    def record_frame(self, zs):
-        """
-        zs: Tensor[loop, latent]
-        """
-        # record_index points to the most recently recorded frame;
-        # so increment it first
+    def advance(self):
         self.record_index = (self.record_index+1)%self.n_memory
-        self.memory[self.record_index, :, :] = zs
 
-    def get_frames(self, n:int):
+    def record(self, z, i:int, dt:int):
+        """
+        z: Tensor[latent]
+        """
+        t = (self.record_index-dt)%self.n_memory
+        self.memory[t, i, :] = z
+    # def record_frame(self, zs):
+    #     """
+    #     zs: Tensor[loop, latent]
+    #     """
+    #     # record_index points to the most recently recorded frame;
+    #     # so increment it first
+    #     self.record_index = (self.record_index+1)%self.n_memory
+    #     self.memory[self.record_index, :, :] = zs
+
+    def get_frames(self, n:int, skip:int=0):
         """
         get contiguous tensor out of ring memory
         """
-        begin = self.record_index - n + 1
+        begin = self.record_index - n - skip + 1
         if begin < 0:
             begin1 = begin % self.n_memory
             block1 = self.memory[begin1:]
             begin2 = max(0, begin)
             block2 = self.memory[begin2:self.record_index+1]
-            return torch.cat((block1, block2))
+            r = torch.cat((block1, block2))
         else:
-            return self.memory[begin:self.record_index+1]
+            r = self.memory[begin:self.record_index+1]
+        if skip>0:
+            return r[:-skip]
+        return r
 
     def encode(self, x):
         """

@@ -166,9 +166,9 @@ class Loop(nn.Module):
         self.weights[:fs] = w
 
         # print(torch.linalg.vector_norm(feature, dim=1))
-        print(w.norm())
-        print(torch.linalg.matrix_rank(feature))
-        print(r.rank)
+        # print(w.norm())
+        # print(torch.linalg.matrix_rank(feature))
+        print("rank:", r.rank)
         # print(r.solution.shape, r.residuals, r.rank, r.singular_values)
         # print(feature.shape, (z-b).shape)
         # print(w.norm(), feature.norm(), (z-b).norm(), z-b)
@@ -294,11 +294,12 @@ class LivingLooper(nn.Module):
         self.memory.zero_()
         self.mask.zero_()
 
-    def forward(self, i:int, x):
+    def forward(self, i:int, x, oneshot:int=0):
         """
         Args:
             i: loop record index, 0 for no loop, 1-index otherwise
             x: Tensor[1, sample]
+            oneshot: 0 for continuation, 1 to loop the training data
         Returns:
             Tensor[loop, sample]
         """
@@ -306,19 +307,20 @@ class LivingLooper(nn.Module):
         lc = self.latency_correct
         # return self.decode(self.encode(x)) ### DEBUG
 
-        z = self.encode(x) # always encode for cache, even if result is not used
+        # always encode for cache, even if result is not used
+        z = self.encode(x) 
 
         if i > self.n_loops:
             i = 0
-        i = i-1 # convert to zero index loop / negative for no loop
-        # zs = torch.empty(self.n_loops, self.n_latent)
+        # convert to zero index loop / negative for no loop
+        i = i-1
 
         i_prev = self.loop_index
         # print(i, i_prev, self.loop_length)
         if i!=i_prev: # change in loop select control
             if i_prev >= 0: # previously on a loop
                 if self.record_length >= self.min_loop: # and it was long enough
-                    self.fit_loop(i_prev)
+                    self.fit_loop(i_prev, oneshot)
             if i>=0: # starting a new loop recording
                 self.record_length = 0
                 self.mask[1,i] = 0.
@@ -335,7 +337,6 @@ class LivingLooper(nn.Module):
         if i>=0:
             # print(x.shape)
             # slice on LHS to appease torchscript
-            # zs[i:i+1] = z[...,0] # remove time dim
             z_i = z[0,:,0] # remove batch, time dims
             self.record(z_i, i, lc)
 
@@ -350,18 +351,15 @@ class LivingLooper(nn.Module):
                 #     mem[:,:j],
                 #     mem[:,j+1:]
                 # ), 1)
-                # slice on LHS to appease torchscript
-                # zs[j:j+1] = loop.eval(feature)
                 z_j = loop.eval(feature)
                 self.record(z_j, j, 0)
 
         # update memory
-        # self.record_frame(zs)
         # if self.loop_index >= 0:
         self.record_length += 1
 
-        # y = self.decode(zs[...,None]) # loops, channels (1), time
-        y = self.decode(self.get_frames(1).permute(1,2,0)) # loops, channels (1), time
+        zs = self.get_frames(1).permute(1,2,0)
+        y = self.decode(zs) # loops, channels (1), time
 
         fade = torch.linspace(0,1,y.shape[2])
         mask = self.mask[1,:,None,None] * fade + self.mask[0,:,None,None] * (1-fade)
@@ -383,7 +381,7 @@ class LivingLooper(nn.Module):
     #         if i==j: return loop
     #     return None
 
-    def fit_loop(self, i:int):
+    def fit_loop(self, i:int, oneshot:int):
         print(f'fit {i+1}')
 
         ll = min(self.n_memory, self.record_length)
@@ -391,10 +389,14 @@ class LivingLooper(nn.Module):
         lc = self.latency_correct
 
         # drop the last lc frames -- there are no target values
-        mem = self.get_frames(ll, lc)
         # wrap the final n_context around
         # TODO: wrap target loop but not others?
-        train_mem = torch.cat((mem[-ctx:], mem),0)
+        if oneshot:
+            mem = self.get_frames(ll, lc)
+            train_mem = torch.cat((mem[-ctx:], mem),0)
+        else:
+            mem = self.get_frames(ll+ctx, lc)
+            train_mem = mem
 
         # limit to last n_fit frames
         # train_mem = train_mem[:self.n_fit+ctx]
@@ -429,14 +431,6 @@ class LivingLooper(nn.Module):
         """
         t = (self.record_index-dt)%self.n_memory
         self.memory[t, i, :] = z
-    # def record_frame(self, zs):
-    #     """
-    #     zs: Tensor[loop, latent]
-    #     """
-    #     # record_index points to the most recently recorded frame;
-    #     # so increment it first
-    #     self.record_index = (self.record_index+1)%self.n_memory
-    #     self.memory[self.record_index, :, :] = zs
 
     def get_frames(self, n:int, skip:int=0):
         """
@@ -465,6 +459,8 @@ class LivingLooper(nn.Module):
         return z
 
     def decode(self, z):
+        """
+        """
         pad_size = self.n_latent_decoder - self.n_latent
         pad_latent = torch.randn(
             z.shape[0],
@@ -536,9 +532,13 @@ looper = LivingLooper(model,
 looper.eval()
 
 # smoke test
-def feed(i):
+def feed(i, oneshot=None):
     x = torch.rand(1, 1, 2**11)-0.5
-    looper(i, x)
+    if oneshot is not None:
+        looper(i, x, oneshot)
+    else:
+        looper(i, x)
+
 
 def smoke_test():
     looper.reset()
@@ -546,7 +546,7 @@ def smoke_test():
     for _ in range(31):
         feed(2)
     for _ in range(args.CONTEXT+3):
-        feed(1)
+        feed(1, oneshot=1)
     for _ in range(10):
         feed(0)
 

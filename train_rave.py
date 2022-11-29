@@ -163,6 +163,15 @@ if __name__ == "__main__":
 
         LOGDIR = "runs"
 
+        # data augmentation
+        AUG_DISTORT_CHANCE = 0.9
+        AUG_DISTORT_GAIN = 32
+        AUG_SPEED_SEMITONES = 1
+        AUG_SPEED_CHANCE = 0.9
+        AUG_DELAY_SAMPLES = 512
+        AUG_DELAY_CHANCE = 0.9
+        AUG_GAIN_DB = 12
+
     args.parse_args()
 
     assert args.NAME is not None
@@ -234,10 +243,12 @@ if __name__ == "__main__":
 
     model.validation_step(x, 0, 0)
 
-    preprocess = lambda name: simple_audio_preprocess(
-        args.SR,
-        2 * args.N_SIGNAL,
-    )(name).astype(np.float16) #why float16 here?
+    # preprocess = lambda name: simple_audio_preprocess(
+    #     args.SR,
+    #     2 * args.N_SIGNAL,
+    # )(name).astype(np.float16) #why float16 here?
+    preprocess = simple_audio_preprocess(
+        args.SR, 2 * args.N_SIGNAL)
 
     def AugmentDelay(max_delay=512):
         def fn(x):
@@ -292,31 +303,38 @@ if __name__ == "__main__":
     dataset = SimpleDataset(
         args.PREPROCESSED,
         args.WAV,
+        extension="*.wav,*.aif,*.flac",
+        map_size=1e12,
         preprocess_function=preprocess,
         split_set="full",
         transforms=Compose([
             lambda x: x.astype(np.float32),
-            RandomApply(AugmentSpeed(semitones=1), p=0.9), 
-            RandomApply(AugmentDelay(max_delay=512), p=0.9),
-            RandomApply(AugmentDistort(max_gain=32), p=0.9),
+            RandomApply(AugmentSpeed(
+                semitones=args.AUG_SPEED_SEMITONES), p=args.AUG_SPEED_CHANCE), 
+            RandomApply(AugmentDelay(
+                max_delay=args.AUG_DELAY_SAMPLES), p=args.AUG_DELAY_CHANCE),
+            RandomApply(AugmentDistort(
+                max_gain=args.AUG_DISTORT_GAIN), p=args.AUG_DISTORT_CHANCE),
             RandomCrop(args.N_SIGNAL),
             lambda x: {
                 tag: augment_split(x)
                 for tag in ('source', 'target')},
-            AugmentGain(db=12),
+            AugmentGain(db=args.AUG_GAIN_DB),
             ])
         )
 
-    def test_preprocess(name):
-        s = simple_audio_preprocess(
-            args.SR,
-            4 * args.N_SIGNAL,
-        )(name)
-        return None if s is None else s.astype(np.float16)
+    # def test_preprocess(name):
+    #     s = simple_audio_preprocess(
+    #         args.SR,
+    #         4 * args.N_SIGNAL,
+    #     )(name)
+    #     return None if s is None else s.astype(np.float16)
     # test_preprocess = lambda name: simple_audio_preprocess(
     #     args.SR,
-    #     8 * args.N_SIGNAL,
+    #     4 * args.N_SIGNAL,
     # )(name).astype(np.float16)
+    test_preprocess = simple_audio_preprocess(
+        args.SR, 4 * args.N_SIGNAL)
 
     test = SimpleDataset(
         args.TEST_PREPROCESSED,

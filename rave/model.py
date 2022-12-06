@@ -369,26 +369,43 @@ class Encoder(nn.Module):
 
             if norm is not None:
                 net.append(norm(in_dim))
+            prev_layer_idx = -1
+            if norm is not None:
+                prev_layer_idx -= 1
+            if i>0:
+                prev_layer_idx -=1
             net.append(
                 ResidualStack(
                     in_dim,
                     3,
                     padding_mode,
-                    cumulative_delay=net[-2 if norm is not None else -1].cumulative_delay,
+                    # cumulative_delay=net[-2 if norm is not None else -1].cumulative_delay,
+                    cumulative_delay=net[prev_layer_idx].cumulative_delay,
                     depth=1,
                     boom=boom,
                     script=script
                 ))
+            # net.append(maybe_wn(
+            #     cc.Conv1d(
+            #         in_dim,
+            #         out_dim, 
+            #         2 * r + 1,
+            #         padding=cc.get_padding(2 * r + 1, r, mode=padding_mode),
+            #         stride=r,
+            #         bias=bias,
+            #         cumulative_delay=net[-1].cumulative_delay,
+            #     )))
             net.append(maybe_wn(
                 cc.Conv1d(
                     in_dim,
                     out_dim, 
-                    2 * r + 1,
-                    padding=cc.get_padding(2 * r + 1, r, mode=padding_mode),
-                    stride=r,
+                    3,
+                    padding=cc.get_padding(3, mode=padding_mode),
                     bias=bias,
                     cumulative_delay=net[-1].cumulative_delay,
                 )))
+            net.append(nn.AvgPool1d(r,r))
+
             
         net.append(nn.LeakyReLU(0.2)) 
 
@@ -400,7 +417,8 @@ class Encoder(nn.Module):
                 padding=cc.get_padding(3, mode=padding_mode),
                 groups=latent_params,
                 bias=bias,
-                cumulative_delay=net[-2].cumulative_delay,
+                # cumulative_delay=net[-2].cumulative_delay,
+                cumulative_delay=net[-3].cumulative_delay,
             )))
 
         self.net = cc.CachedSequential(*net)
@@ -675,12 +693,12 @@ class RAVE(pl.LightningModule):
             script,
         )
 
-        print('encoder')
-        for n,p in self.encoder.named_parameters():
-            print(f'{n}: {p.numel()}')
-        print('generator')
-        for n,p in self.decoder.named_parameters():
-            print(f'{n}: {p.numel()}')
+        # print('encoder')
+        # for n,p in self.encoder.named_parameters():
+        #     print(f'{n}: {p.numel()}')
+        # print('generator')
+        # for n,p in self.decoder.named_parameters():
+        #     print(f'{n}: {p.numel()}')
 
         if adversarial_loss or feature_match:
             self.discriminator = maybe_script(StackDiscriminators(
@@ -1094,6 +1112,8 @@ class RAVE(pl.LightningModule):
         return z
 
     def decode(self, z):
+        z = self.pad_latent(z)
+
         y = self.decoder(z, add_noise=True)
         if self.pqmf is not None:
             y = self.pqmf.inverse(y)
@@ -1183,7 +1203,7 @@ class RAVE(pl.LightningModule):
         # w: (out, in, kernel)
         # b: (out)
         layer_in = self.encoder.net[-1]
-        layer_prev = self.encoder.net[-3]
+        layer_prev = self.encoder.net[-4]
         if hasattr(layer_in, "weight_g"):
             remove_weight_norm(layer_in)
         if hasattr(layer_prev, "weight_g"):
@@ -1319,13 +1339,13 @@ class RAVE(pl.LightningModule):
                 klds, kld_idxs = klds.cpu().sort(descending=True)
                 self.kld_idxs[:] = kld_idxs
                 kld_p = (klds / klds.sum()).cumsum(0)
-                print(kld_p)
+                # print(kld_p)
                 for p in var_p:
                     self.log(f"{p}_manifold/kld",
                             torch.argmax((kld_p > p).long()).item())
 
-            n = 32 if tag=='valid' else 8
-            y = torch.cat(audio, 0)[:n].reshape(-1)
+            n = 16 if tag=='valid' else 8
+            y = torch.cat(audio[:1+n//audio[0].shape[0]], 0)[:n].reshape(-1)
             self.logger.experiment.add_audio(
                 f"audio_{tag}", y, self.saved_step.item(), self.sr)
 

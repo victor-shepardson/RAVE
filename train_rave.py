@@ -16,6 +16,9 @@ import GPUtil as gpu
 
 from udls.transforms import Compose, RandomApply, Dequantize, RandomCrop
 
+# fix torch device order to be same as nvidia-smi order
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+
 if __name__ == "__main__":
 
     class args(Config):
@@ -383,9 +386,6 @@ if __name__ == "__main__":
         filename="{epoch}", save_top_k=-1, every_n_epochs=args.CKPT_EVERY
         )
     last_checkpoint = pl.callbacks.ModelCheckpoint(filename="last")
-
-    # fix torch device order to be same as nvidia-smi order
-    os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
 
     CUDA = gpu.getAvailable(maxMemory=.05)
     VISIBLE_DEVICES = environ.get("CUDA_VISIBLE_DEVICES", "")

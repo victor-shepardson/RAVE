@@ -675,12 +675,12 @@ class RAVE(pl.LightningModule):
             script,
         )
 
-        print('encoder')
-        for n,p in self.encoder.named_parameters():
-            print(f'{n}: {p.numel()}')
-        print('generator')
-        for n,p in self.decoder.named_parameters():
-            print(f'{n}: {p.numel()}')
+        # print('encoder')
+        # for n,p in self.encoder.named_parameters():
+        #     print(f'{n}: {p.numel()}')
+        # print('generator')
+        # for n,p in self.decoder.named_parameters():
+        #     print(f'{n}: {p.numel()}')
 
         if adversarial_loss or feature_match:
             self.discriminator = maybe_script(StackDiscriminators(
@@ -1094,6 +1094,9 @@ class RAVE(pl.LightningModule):
         return z
 
     def decode(self, z):
+        print(z.shape)
+        z = self.pad_latent(z)
+        print(z.shape)
         y = self.decoder(z, add_noise=True)
         if self.pqmf is not None:
             y = self.pqmf.inverse(y)
@@ -1319,13 +1322,13 @@ class RAVE(pl.LightningModule):
                 klds, kld_idxs = klds.cpu().sort(descending=True)
                 self.kld_idxs[:] = kld_idxs
                 kld_p = (klds / klds.sum()).cumsum(0)
-                print(kld_p)
+                # print(kld_p)
                 for p in var_p:
                     self.log(f"{p}_manifold/kld",
                             torch.argmax((kld_p > p).long()).item())
 
-            n = 32 if tag=='valid' else 8
-            y = torch.cat(audio, 0)[:n].reshape(-1)
+            n = 16 if tag=='valid' else 8
+            y = torch.cat(audio[:1+n//audio[0].shape[0]], 0)[:n].reshape(-1)
             self.logger.experiment.add_audio(
                 f"audio_{tag}", y, self.saved_step.item(), self.sr)
 

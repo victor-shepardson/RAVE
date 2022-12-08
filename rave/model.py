@@ -385,22 +385,13 @@ class Encoder(nn.Module):
                     boom=boom,
                     script=script
                 ))
-            # net.append(maybe_wn(
-            #     cc.Conv1d(
-            #         in_dim,
-            #         out_dim, 
-            #         2 * r + 1,
-            #         padding=cc.get_padding(2 * r + 1, r, mode=padding_mode),
-            #         stride=r,
-            #         bias=bias,
-            #         cumulative_delay=net[-1].cumulative_delay,
-            #     )))
             net.append(maybe_wn(
                 cc.Conv1d(
                     in_dim,
                     out_dim, 
-                    3,
-                    padding=cc.get_padding(3, mode=padding_mode),
+                    2 * r + 1,
+                    padding=cc.get_padding(2 * r + 1, r, mode=padding_mode),
+                    # stride=r,
                     bias=bias,
                     cumulative_delay=net[-1].cumulative_delay,
                 )))
@@ -815,12 +806,6 @@ class RAVE(pl.LightningModule):
     def reparametrize(self, mean, scale):
 
         if self.cropped_latent_size > 0:
-            # noise = torch.randn(
-            #     mean.shape[0],
-            #     self.latent_size - self.cropped_latent_size,
-            #     mean.shape[-1],
-            # ).to(mean.device)
-            # z = torch.cat([mean, noise], 1)
             z = mean
             kl = None
         else:

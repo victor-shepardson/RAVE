@@ -35,7 +35,7 @@ class args(Config):
 args.parse_args()
 cc.use_cached_conv(args.CACHED)
 
-from rave.model import RAVE
+from rave.model import RAVE, remove_weight_norm
 from rave.resample import Resampling
 from rave.core import search_for_run
 
@@ -127,7 +127,7 @@ class TraceModel(nn.Module):
         if self.pqmf is not None:
             x = self.pqmf(x)
 
-        mean, scale = self.encoder(x)
+        mean, scale = self.encoder(x).chunk(2,1)
         mean, std = self.post_process_distribution(mean, scale)
 
         if self.deterministic:
@@ -148,7 +148,7 @@ class TraceModel(nn.Module):
         if self.pqmf is not None:
             x = self.pqmf(x)
 
-        mean, scale = self.encoder(x)
+        mean, scale = self.encoder(x).chunk(2,1)
         mean, std = self.post_process_distribution(mean, scale)
         var = std * std
 
@@ -215,20 +215,19 @@ logging.info("loading model from checkpoint")
 
 RUN = search_for_run(args.RUN)
 logging.info(f"using {RUN}")
-model = RAVE.load_from_checkpoint(RUN, strict=False).eval()
+model = RAVE.load_from_checkpoint(RUN, script=False, strict=False).eval()
 
 logging.info("flattening weights")
 for m in model.modules():
     if hasattr(m, "weight_g"):
-        nn.utils.remove_weight_norm(m)
+        remove_weight_norm(m)
 
 logging.info("warmup forward pass")
 x = torch.zeros(1, 1, 2**14)
 if model.pqmf is not None:
     x = model.pqmf(x)
 
-# z, _ = model.reparametrize(*model.encoder(x))
-z = model.reparametrize(*model.encoder(x))
+z, _ = model.reparametrize(*model.split_params(model.encoder(x)))
 
 if args.STEREO:
     z = z.expand(2, *z.shape[1:])

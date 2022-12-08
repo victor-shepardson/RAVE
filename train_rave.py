@@ -174,6 +174,8 @@ if __name__ == "__main__":
         AUG_DELAY_SAMPLES = 512
         AUG_DELAY_CHANCE = 0.9
         AUG_GAIN_DB = 12
+        # different allpass filter for input and target (prevent z from learning absolute phase)
+        SPLIT_ALLPASS = True
 
     args.parse_args()
 
@@ -303,6 +305,15 @@ if __name__ == "__main__":
             return {k:v*gain for k,v in xs.items()}
         return fn
 
+    split = lambda x: {
+        tag: augment_split(x)
+        for tag in ('source', 'target')},
+
+    no_split = lambda x: {
+        'source': x.astype(np.float32),
+        'target': x.astype(np.float32),
+        },
+
     dataset = SimpleDataset(
         args.PREPROCESSED,
         args.WAV,
@@ -319,9 +330,7 @@ if __name__ == "__main__":
             RandomApply(AugmentDistort(
                 max_gain=args.AUG_DISTORT_GAIN), p=args.AUG_DISTORT_CHANCE),
             RandomCrop(args.N_SIGNAL),
-            lambda x: {
-                tag: augment_split(x)
-                for tag in ('source', 'target')},
+            split if args.SPLIT_ALLPASS else no_split,
             AugmentGain(db=args.AUG_GAIN_DB),
             ])
         )
@@ -352,10 +361,7 @@ if __name__ == "__main__":
             #     p=.8,
             # ),
             Dequantize(16),
-            lambda x: {
-                'source': x.astype(np.float32),
-                'target': x.astype(np.float32),
-                },
+            no_split
         ]),
     )
 

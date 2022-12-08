@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -24,9 +24,12 @@ class args(Config):
     # run smoke tests before exporting
     TEST = 1
     # model checkpoint path
-    RUN = None
-    # audio sample rate -- currently must match RAVE model
-    SR = None
+    CKPT = None
+    # exported rave / rave+prior / neutone model
+    # note that older models might not work (if they don't support batching)
+    TS = None
+    # audio sample rate -- currently must match RAVE model if given
+    SR = 0
     # should be true for realtime
     CACHED = True
     # number of latents to preserve from RAVE model
@@ -40,7 +43,7 @@ class args(Config):
     # max frames for loop memory
     MEMORY = 1000
     # latency correction, latent frames
-    LATENCY_CORRECT = 3
+    LATENCY_CORRECT = 2
     # included in output filename
     NAME = "test"
 
@@ -143,7 +146,6 @@ class Loop(nn.Module):
         # print(torch.linalg.vector_norm(feature, dim=(0,1,3)))
         # print(torch.linalg.vector_norm(feature, dim=(0,1,2)))
 
-
         self.context = feature.shape[1]
         assert feature.shape[2]==self.n_loops
         assert feature.shape[3]==self.n_latent
@@ -192,13 +194,6 @@ class Loop(nn.Module):
 
         z = self.target_process_inv(z).squeeze(0)
 
-        # TODO:
-        # loop maintains the buffer of latency_correct
-        # predictions ahead; 
-        # eval rolls them out automatically if not full
-        # eval also slices 
-
-
         return z
 
     def read(self, step:int):
@@ -237,12 +232,13 @@ class LivingLooper(nn.Module):
     latency_correct:int
 
     def __init__(self, 
-            rave_model:RAVE, 
+            rave_model:Union[RAVE, torch.jit.ScriptModule], 
             n_loops:int, 
             n_context:int, # maximum time dimension of model feature
             n_memory:int, # maximum loop memory 
             n_fit:int, # maximum dataset size to fit
-            latency_correct:int
+            latency_correct:int, # in latent frames
+            sr:int # sample rate
             ):
         super().__init__()
 
@@ -254,10 +250,32 @@ class LivingLooper(nn.Module):
         self.min_loop = 2
         self.latency_correct = latency_correct
 
-        self.block_size = model.block_size()
-        self.sampling_rate = model.hparams['sr']
+        # support standard exported RAVE models
+        if isinstance(rave_model, torch.jit.ScriptModule):
+            # unwrap neutone
+            if hasattr(rave_model, 'model'):
+                rave_model = rave_model.model
+            # unwrap rave+prior
+            if hasattr(rave_model, '_rave'):
+                rave_model = rave_model._rave
+            self.block_size = rave_model.encode_params[3].item()
+            self.sampling_rate = rave_model.sampling_rate.item()
+            self.rave = rave_model
+        else:
+            self.block_size = rave_model.block_size()
+            self.sampling_rate = rave_model.hparams['sr']
+            self.rave = None
 
-        self.trained_cropped = bool(rave_model.cropped_latent_size)
+        try:
+            cropped_latent_size = rave_model.cropped_latent_size
+        except AttributeError:
+            cropped_latent_size = 0
+
+        print(f'{self.block_size=}, {self.sampling_rate=}')
+
+        assert sr==0 or sr==self.sampling_rate
+
+        self.trained_cropped = bool(cropped_latent_size)
         self.n_latent = (
             rave_model.cropped_latent_size 
             if self.trained_cropped 
@@ -382,6 +400,9 @@ class LivingLooper(nn.Module):
     #     return None
 
     def fit_loop(self, i:int, oneshot:int):
+        """
+        assemble dataset and fit a loop to it
+        """
         print(f'fit {i+1}')
 
         ll = min(self.n_memory, self.record_length)
@@ -423,6 +444,9 @@ class LivingLooper(nn.Module):
 
 
     def advance(self):
+        """
+        advance the record head
+        """
         self.record_index = (self.record_index+1)%self.n_memory
 
     def record(self, z, i:int, dt:int):
@@ -451,7 +475,11 @@ class LivingLooper(nn.Module):
 
     def encode(self, x):
         """
+        RAVE encoder
         """
+        if self.rave is not None:
+            return self.rave.encode(x)
+
         if self.pqmf is not None:
             x = self.pqmf(x)
 
@@ -460,7 +488,11 @@ class LivingLooper(nn.Module):
 
     def decode(self, z):
         """
+        RAVE decoder
         """
+        if self.rave is not None:
+            return self.rave.decode(z)
+
         pad_size = self.n_latent_decoder - self.n_latent
         pad_latent = torch.randn(
             z.shape[0],
@@ -477,68 +509,56 @@ class LivingLooper(nn.Module):
             x = self.pqmf.inverse(x)
 
         return x
-
               
 
-logging.info("loading RAVE model from checkpoint")
+if args.CKPT is not None:
+    logging.info("loading RAVE model from checkpoint")
 
-RUN = search_for_run(args.RUN)
-logging.info(f"using {RUN}")
+    ckpt = search_for_run(args.CKPT)
+    logging.info(f"using {ckpt}")
 
-# debug_kw = {}
-debug_kw = {'script':False}#, 'cropped_latent_size':36, 'latent_size':128} ###DEBUG
-# debug_kw = {'cropped_latent_size':8, 'latent_size':128} ###DEBUG
+    # debug_kw = {}
+    debug_kw = {'script':False}#, 'cropped_latent_size':36, 'latent_size':128} ###DEBUG
+    # debug_kw = {'cropped_latent_size':8, 'latent_size':128} ###DEBUG
 
-model = RAVE.load_from_checkpoint(RUN, **debug_kw, strict=False).eval()
+    model = RAVE.load_from_checkpoint(ckpt, **debug_kw, strict=False).eval()
 
-if args.LATENT_SIZE is not None:
-    model.crop_latent_space(int(args.LATENT_SIZE))
+    logging.info("flattening weights")
+    for m in model.modules():
+        if hasattr(m, "weight_g"):
+            remove_weight_norm(m)
 
-logging.info("flattening weights")
-for m in model.modules():
-    if hasattr(m, "weight_g"):
-        remove_weight_norm(m)
+    if args.LATENT_SIZE is not None:
+        model.crop_latent_space(int(args.LATENT_SIZE))
 
-logging.info("warmup forward pass")
-x = torch.zeros(1, 1, 2**14)
-if model.pqmf is not None:
-    x = model.pqmf(x)
+elif args.TS is not None:
+    logging.info("loading RAVE model from torchscript")
 
-z, _ = model.reparametrize(*model.split_params(model.encoder(x)))
-z = model.pad_latent(z)
+    model = torch.jit.load(args.TS)
 
-y = model.decoder(z)
-
-if model.pqmf is not None:
-    y = model.pqmf.inverse(y)
+    if args.LATENT_SIZE is not None:
+        logging.warn("torchscript models assumed to already be cropped")
+        assert args.LATENT_SIZE in (model.cropped_latent_size, model.latent_size)
 
 model.discriminator = None
-
-sr = model.sr
-
-# print(model.encoder.net[-1])
-# print(model.encoder.net[-1].cache)
-# print(model.encoder.net[-1].cache.initialized)
-# print(model.encoder.net[-1].cache.pad.shape)
-
-assert int(args.SR) == sr, f"model sample rate is {sr}"
 
 logging.info("creating looper")
 # ls = None if args.LATENT_SIZE is None else int(args.LATENT_SIZE)
 looper = LivingLooper(model, 
     args.LOOPS, args.CONTEXT, 
     args.MEMORY, args.FIT,
-    args.LATENCY_CORRECT)
+    args.LATENCY_CORRECT,
+    args.SR)
 looper.eval()
 
 # smoke test
 def feed(i, oneshot=None):
-    x = torch.rand(1, 1, 2**11)-0.5
-    if oneshot is not None:
-        looper(i, x, oneshot)
-    else:
-        looper(i, x)
-
+    with torch.inference_mode():
+        x = torch.rand(1, 1, 2**11)-0.5
+        if oneshot is not None:
+            looper(i, x, oneshot)
+        else:
+            looper(i, x)
 
 def smoke_test():
     looper.reset()

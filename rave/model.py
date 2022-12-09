@@ -373,7 +373,7 @@ class Encoder(nn.Module):
             if norm is not None:
                 prev_layer_idx -= 1
             if i>0:
-                prev_layer_idx -=1
+                prev_layer_idx -= 1
             net.append(
                 ResidualStack(
                     in_dim,
@@ -395,7 +395,8 @@ class Encoder(nn.Module):
                     bias=bias,
                     cumulative_delay=net[-1].cumulative_delay,
                 )))
-            net.append(nn.AvgPool1d(r,r))
+            # net.append(nn.AvgPool1d(r,r))
+            net.append(nn.MaxPool1d(r,r))
 
             
         net.append(nn.LeakyReLU(0.2)) 

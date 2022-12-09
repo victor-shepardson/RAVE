@@ -174,7 +174,8 @@ if __name__ == "__main__":
         AUG_DELAY_SAMPLES = 512
         AUG_DELAY_CHANCE = 0.9
         AUG_GAIN_DB = 12
-        # different allpass filter for input and target (prevent z from learning absolute phase)
+        # different allpass filter for input and target
+        # (prevent latent space from learning absolute phase)
         SPLIT_ALLPASS = True
 
     args.parse_args()
@@ -305,14 +306,14 @@ if __name__ == "__main__":
             return {k:v*gain for k,v in xs.items()}
         return fn
 
-    split = lambda x: {
-        tag: augment_split(x)
-        for tag in ('source', 'target')},
+    def split(x):
+        return {tag: augment_split(x) for tag in ('source', 'target')}
 
-    no_split = lambda x: {
-        'source': x.astype(np.float32),
-        'target': x.astype(np.float32),
-        },
+    def no_split(x): 
+        return {
+            'source': x.astype(np.float32),
+            'target': x.astype(np.float32),
+            }
 
     dataset = SimpleDataset(
         args.PREPROCESSED,

@@ -372,14 +372,13 @@ class Encoder(nn.Module):
             prev_layer_idx = -1
             if norm is not None:
                 prev_layer_idx -= 1
-            if i>0:
-                prev_layer_idx -= 1
+            # if i>0:
+                # prev_layer_idx -= 1
             net.append(
                 ResidualStack(
                     in_dim,
                     3,
                     padding_mode,
-                    # cumulative_delay=net[-2 if norm is not None else -1].cumulative_delay,
                     cumulative_delay=net[prev_layer_idx].cumulative_delay,
                     depth=1,
                     boom=boom,
@@ -390,13 +389,14 @@ class Encoder(nn.Module):
                     in_dim,
                     out_dim, 
                     2 * r + 1,
-                    padding=cc.get_padding(2 * r + 1, r, mode=padding_mode),
-                    # stride=r,
+                    # padding=cc.get_padding(2 * r + 1, r, mode=padding_mode),
+                    padding = (r + 1, 0),
+                    stride=r,
                     bias=bias,
                     cumulative_delay=net[-1].cumulative_delay,
                 )))
             # net.append(nn.AvgPool1d(r,r))
-            net.append(nn.MaxPool1d(r,r))
+            # net.append(nn.MaxPool1d(r,r))
 
             
         net.append(nn.LeakyReLU(0.2)) 
@@ -409,8 +409,8 @@ class Encoder(nn.Module):
                 padding=cc.get_padding(3, mode=padding_mode),
                 groups=latent_params,
                 bias=bias,
-                # cumulative_delay=net[-2].cumulative_delay,
-                cumulative_delay=net[-3].cumulative_delay,
+                cumulative_delay=net[-2].cumulative_delay,
+                # cumulative_delay=net[-3].cumulative_delay,
             )))
 
         self.net = cc.CachedSequential(*net)
@@ -1189,7 +1189,8 @@ class RAVE(pl.LightningModule):
         # w: (out, in, kernel)
         # b: (out)
         layer_in = self.encoder.net[-1]
-        layer_prev = self.encoder.net[-4]
+        layer_prev = self.encoder.net[-3]
+        # layer_prev = self.encoder.net[-4]
         if hasattr(layer_in, "weight_g"):
             remove_weight_norm(layer_in)
         if hasattr(layer_prev, "weight_g"):

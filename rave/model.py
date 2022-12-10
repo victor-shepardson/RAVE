@@ -164,8 +164,11 @@ class NoiseGenerator(nn.Module):
                 cc.Conv1d(
                     channels[i],
                     channels[i + 1],
-                    3,
-                    padding=cc.get_padding(3, r, mode=padding_mode),
+                    # 3,
+                    # padding=cc.get_padding(3, r, mode=padding_mode),
+                    # stride=r,
+                    2 * r + 1,
+                    padding = (r + 1, 0),
                     stride=r,
                     cumulative_delay=cum_delay,
                 ))
@@ -264,15 +267,19 @@ class Generator(nn.Module):
                 bias=bias,
             ))
 
+        r = loud_stride
         loud_gen = wn(
             cc.Conv1d(
                 out_dim,
                 1,
-                2 * loud_stride + 1,
-                stride=loud_stride,
-                padding=cc.get_padding(2 * loud_stride + 1,
-                                       loud_stride,
-                                       mode=padding_mode),
+                2 * r + 1,
+                padding = (r + 1, 0),
+                stride=r,
+                # 2 * loud_stride + 1,
+                # stride=loud_stride,
+                # padding=cc.get_padding(2 * loud_stride + 1,
+                #                        loud_stride,
+                #                        mode=padding_mode),
                 bias=bias,
             ))
 
@@ -788,6 +795,7 @@ class RAVE(pl.LightningModule):
         stfts = multiscale_stft(torch.cat(parts), scales, .75)
         if y2 is None:
             x, y = zip(*(s.chunk(2) for s in stfts))
+            # lin = sum(map(self.norm_lin_distance, x, y))
             lin = sum(map(self.lin_distance, x, y))
             log = sum(map(self.log_distance, x, y))
         else:

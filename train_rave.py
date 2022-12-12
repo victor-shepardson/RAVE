@@ -310,6 +310,7 @@ if __name__ == "__main__":
         return {tag: augment_split(x) for tag in ('source', 'target')}
 
     def no_split(x): 
+        x = Dequantize(16)(x)
         return {
             'source': x.astype(np.float32),
             'target': x.astype(np.float32),
@@ -361,7 +362,7 @@ if __name__ == "__main__":
             #     lambda x: random_phase_mangle(x, 20, 2000, .99, args.SR),
             #     p=.8,
             # ),
-            Dequantize(16),
+            # Dequantize(16),
             no_split
         ]),
     )

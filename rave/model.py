@@ -125,26 +125,29 @@ class UpsampleLayer(nn.Module):
         super().__init__()
         net = []#[nn.LeakyReLU(.2)]
         if ratio > 1:
-            net.append(
-                wn(
-                    cc.ConvTranspose1d(
-                        in_dim,
-                        out_dim,
-                        2 * ratio,
-                        stride=ratio,
-                        padding=ratio // 2,
-                        bias=bias,
-                    )))
-        else:
-            net.append(
-                wn(
-                    cc.Conv1d(
-                        in_dim,
-                        out_dim,
-                        3,
-                        padding=cc.get_padding(3, mode=padding_mode),
-                        bias=bias,
-                    )))
+            net.append(nn.Upsample(scale_factor=ratio))
+            # net.append(
+                # wn(
+                #     cc.ConvTranspose1d(
+                #         in_dim,
+                #         out_dim,
+                #         2 * ratio,
+                #         stride=ratio,
+                #         padding=ratio // 2,
+                #         bias=bias,
+                #     )))
+        # else:
+        net.append(
+            wn(
+                cc.Conv1d(
+                    in_dim,
+                    out_dim,
+                    # 3,
+                    # padding=cc.get_padding(3, mode=padding_mode),
+                    2*ratio+1,
+                    padding=cc.get_padding(2*ratio+1, mode=padding_mode),
+                    bias=bias,
+                )))
 
         self.net = cc.CachedSequential(*net)
         self.cumulative_delay = self.net.cumulative_delay + cumulative_delay * ratio

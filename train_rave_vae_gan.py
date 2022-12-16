@@ -22,7 +22,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 if __name__ == "__main__":
 
     class args(Config):
-        groups = ["small", "large"]
+        groups = ["vae", "gan"]
 
         PROFILE = False
         CKPT_EVERY = 30
@@ -32,7 +32,7 @@ if __name__ == "__main__":
         # hidden layer width for the encoder and generator
         # if CAPACITY == DATA_SIZE, data dimension is preserved throughout,
         # modulo effect of NARROW and LATENT_SIZE
-        CAPACITY = setting(default=32, small=16, large=32)
+        CAPACITY = 32
         # extra inner width in resblocks
         BOOM = 2
         # number of latent dimensions before pruning
@@ -47,25 +47,17 @@ if __name__ == "__main__":
         # 'batch' for batch norm only (original version),
         # 'instance' for weight+instance norm
         ENCODER_NORM = None
-        # enables causal convolutions, also lowers quality of PQMF, which reduces latency of the inverse filter (?)
-        NO_LATENCY = False
+        # enables causal convolutions, also affects quality of PQMF
+        NO_LATENCY = True
         # stride/upsample factor between blocks in the encoder and generator. also determines depth of encoder/generator
-        RATIOS = setting(
-            default=[4, 4, 4, 2],
-            small=[4, 4, 4, 2],
-            large=[4, 4, 2, 2, 2],
-        )
+        RATIOS = [2,2,2,2,2,2,2]
         # reduction in data dim in encoder / increase (reversed) in generator
-        NARROW = setting(
-            default=[1, 2, 2, 2],
-            small=[1, 2, 2, 2],
-            large=[1, 1, 2, 2, 2],
-        )
+        NARROW = [1,1,1,1,2,2,2]
         #low and high values for the cyclic beta-VAE objective
-        MIN_KL = 1e-1
+        MIN_KL = 1e-4
         MAX_KL = 1e-1
         # use a different parameterization and compute the sample KLD instead of analytic
-        SAMPLE_KL = False
+        SAMPLE_KL = True
         # use the kld term from http://arxiv.org/abs/1703.09194
         # (SAMPLE_KL must be true)
         PATH_DERIVATIVE = False
@@ -79,7 +71,7 @@ if __name__ == "__main__":
         TOTAL_LATENT_SIZE = 0
 
         # whether to include the discriminator feature-matching loss as part of loss_gen
-        FEATURE_MATCH = True
+        FEATURE_MATCH = setting(default=False, vae=False, gan=True)
         # architectural parameter for the generator (specifically, the ‘loudness’ branch)
         LOUD_STRIDE = 1
         # enables the noise branch of the generator during training
@@ -114,23 +106,24 @@ if __name__ == "__main__":
         # use GAN loss for generator training
         # if this is False but FEATURE_MATCH is True,
         # there will still be a discriminator
-        ADVERSARIAL_LOSS = False
+        ADVERSARIAL_LOSS = setting(default=False, vae=False, gan=True)
         # type of GAN loss
         MODE = "hinge"
         # stop encoder training
-        FREEZE_ENCODER = False
+        FREEZE_ENCODER = setting(default=False, vae=False, gan=True)
         # whether to use the original normalized linear distance when not using GED
-        USE_NORM_DIST = False
+        USE_NORM_DIST = True
 
         # this only affects KL annealing schedule now
-        WARMUP = setting(default=500000, small=500000, large=1500000)
+        WARMUP = 300_000
         # steps to cycle the KLD if MIN_KL and MAX_KL differ
         # KL_CYCLE = 50000
         
         # checkpoint to resume training from
         CKPT = None
         # checkpoint to load model but not training state from
-        TRANSFER_CKPT = None
+        # TRANSFER_CKPT = None
+        RESUME = False
 
         # path to store preprocessed dataset, or to already preprocessed data
         PREPROCESSED = None
@@ -143,14 +136,14 @@ if __name__ == "__main__":
         # audio sample rate
         SR = 48000
         # end training after this many iterations
-        MAX_STEPS = setting(default=3000000, small=3000000, large=6000000)
+        MAX_STEPS = 3_000_000
         # run validation every so many iterations
-        VAL_EVERY = 10000
+        VAL_EVERY = 10_000
         
         # batch length in audio samples
         N_SIGNAL = 65536
         # batch size
-        BATCH = 8
+        BATCH = 16
         # generator+encoder learning rate
         GEN_LR = 1e-4
         # discriminator learning rate
@@ -164,7 +157,7 @@ if __name__ == "__main__":
         GRAD_CLIP = None
         # automatic mixed precision training
         AMP = False
-        #
+        # optimize GPU algos
         CUDNN_BENCHMARK = True
 
         # descriptive name for run
@@ -173,26 +166,35 @@ if __name__ == "__main__":
         LOGDIR = "runs"
 
         # data augmentation
-        AUG_DISTORT_CHANCE = 0.9
+        AUG_DISTORT_CHANCE = 0
         AUG_DISTORT_GAIN = 32
-        AUG_SPEED_SEMITONES = 1
         AUG_SPEED_CHANCE = 0.9
+        AUG_SPEED_SEMITONES = 0.1
+        AUG_DELAY_CHANCE = 0
         AUG_DELAY_SAMPLES = 512
-        AUG_DELAY_CHANCE = 0.9
         AUG_GAIN_DB = 12
+
         # different allpass filter for input and target
         # (prevent latent space from learning absolute phase)
-        SPLIT_ALLPASS = True
+        SPLIT_ALLPASS = setting(default=False, vae=True, gan=False)
 
     args.parse_args()
 
-    assert args.NAME is not None
+    # assert args.NAME is not None
 
-    if args.TRANSFER_CKPT is not None:
-        if args.CKPT is not None:
-            raise ValueError("""
-            supply either TRANSFER_CKPT and CKPT but not both
-            """)
+    # if args.TRANSFER_CKPT  is not None:
+    #     if args.CKPT is not None:
+    #         raise ValueError("""
+    #         supply either TRANSFER_CKPT and CKPT but not both
+    #         """)
+    if args.RESUME:
+        resume_ckpt = args.CKPT
+        xfer_ckpt = None
+    else:
+        resume_ckpt = None
+        xfer_ckpt = args.CKPT 
+
+    if xfer_ckpt is not None:
         # well this is horrible
         # would be very nice if effortless_config gave a way to get just the supplied arguments...
         # maybe it would be cleaner to specify just the params to exclude actually
@@ -201,9 +203,10 @@ if __name__ == "__main__":
             'freeze_encoder', 'adversarial_loss', 'ged', 'feature_match',
             'pair_discriminator', 'dis_lr', 'dis_adam_betas', 'grad_clip',
             'd_capacity', 'd_multiplier', 'd_n_layers', 'd_stack_factor',
-            'use_noise'
+            'use_noise', 'amp', 'mode', 'use_norm_dist'
         )
-        model = RAVE.load_from_checkpoint(args.TRANSFER_CKPT, **{
+        # model = RAVE.load_from_checkpoint(args.TRANSFER_CKPT, **{
+        model = RAVE.load_from_checkpoint(xfer_ckpt, **{
             a:getattr(args, a.upper()) for a in xfer_hp
         }, strict=False)
         if args.CROPPED_LATENT_SIZE > 0:
@@ -257,12 +260,14 @@ if __name__ == "__main__":
 
     model.validation_step(x, 0, 0)
 
-    # preprocess = lambda name: simple_audio_preprocess(
-    #     args.SR,
-    #     2 * args.N_SIGNAL,
-    # )(name).astype(np.float16) #why float16 here?
-    preprocess = simple_audio_preprocess(
-        args.SR, 2 * args.N_SIGNAL)
+    def preprocess(name):
+        s = simple_audio_preprocess(
+            args.SR,
+            2 * args.N_SIGNAL,
+        )(name)
+        return None if s is None else s.astype(np.float16) #why float16 here?
+    # preprocess = simple_audio_preprocess(
+    #     args.SR, 2 * args.N_SIGNAL)
 
     def AugmentDelay(max_delay=512):
         def fn(x):
@@ -345,18 +350,14 @@ if __name__ == "__main__":
             ])
         )
 
-    # def test_preprocess(name):
-    #     s = simple_audio_preprocess(
-    #         args.SR,
-    #         4 * args.N_SIGNAL,
-    #     )(name)
-    #     return None if s is None else s.astype(np.float16)
-    # test_preprocess = lambda name: simple_audio_preprocess(
-    #     args.SR,
-    #     4 * args.N_SIGNAL,
-    # )(name).astype(np.float16)
-    test_preprocess = simple_audio_preprocess(
-        args.SR, 4 * args.N_SIGNAL)
+    def test_preprocess(name):
+        s = simple_audio_preprocess(
+            args.SR,
+            4 * args.N_SIGNAL,
+        )(name)
+        return None if s is None else s.astype(np.float16)
+    # test_preprocess = simple_audio_preprocess(
+    #     args.SR, 4 * args.N_SIGNAL)
 
     test = SimpleDataset(
         args.TEST_PREPROCESSED,
@@ -365,12 +366,6 @@ if __name__ == "__main__":
         split_set="full",
         transforms=Compose([
             lambda x: x.astype(np.float32),
-            # RandomCrop(args.N_SIGNAL),
-            # RandomApply(
-            #     lambda x: random_phase_mangle(x, 20, 2000, .99, args.SR),
-            #     p=.8,
-            # ),
-            # Dequantize(16),
             no_split
         ]),
     )
@@ -427,9 +422,7 @@ if __name__ == "__main__":
         val_check["check_val_every_n_epoch"] = nepoch
     print(val_check)
 
-    # run = search_for_run(args.CKPT, mode="epoch")
-    run = search_for_run(args.CKPT, mode="last")
-    # if run is None: run = search_for_run(args.CKPT, mode="best")
+    run = search_for_run(resume_ckpt, mode="last")
     if run is not None:
         step = torch.load(run, map_location='cpu')["global_step"]
     else:
@@ -452,29 +445,6 @@ if __name__ == "__main__":
 
     if run is not None:
         trainer.fit_loop.epoch_loop._batches_that_stepped = step #???
-
-    # trainer.fit(model, train, [val, test], ckpt_path=run)
-
-    # if args.PROFILE:
-    #     model.cuda()
-    #     from torch.profiler import profile, ProfilerActivity
-    #     from torch.cuda import nvtx
-    #     it = iter(train)
-    #     def step():
-    #         batch = next(it)
-    #         batch = {k:v.to(device='cuda',non_blocking=True) for k,v in batch.items()}
-    #         nvtx.range_push('step')
-    #         model.training_step(batch, 0)
-    #         nvtx.range_pop()
-    #     for _ in range(8):
-    #         step()
-    #     with profile(
-    #         activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-    #         with_stack=True
-    #         ) as prof:
-    #         for _ in range(3):
-    #             step()
-    #     prof.export_chrome_trace("rave_trace.json")
 
     if args.PROFILE:
         from torch.profiler import profile, ProfilerActivity

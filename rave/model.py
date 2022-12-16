@@ -87,7 +87,7 @@ class ResidualStack(nn.Module):
                         ),
                         dilation=3**i,
                         bias=bias,
-                        groups=dim//16,
+                        groups=dim//min(dim, 16),
                     )))
 
             seq.append(nn.LeakyReLU(.2))
@@ -1137,9 +1137,9 @@ class RAVE(pl.LightningModule):
         
 
         if loader_idx==0:
-            return torch.cat([target, y], -1), mean, kl
+            return torch.cat([y, target], -1), mean, kl
         if loader_idx>0:
-            return torch.cat([target, y, y2], -1), mean, None
+            return torch.cat([y, target, y2], -1), mean, None
 
     def block_size(self):
         return np.prod(self.hparams['ratios']) * self.hparams['data_size'] 
@@ -1310,7 +1310,7 @@ class RAVE(pl.LightningModule):
                 # print(kld_p)
                 for p in var_p:
                     self.log(f"{p}_manifold/kld",
-                            torch.argmax((kld_p > p).long()).item())
+                            torch.argmax((kld_p > p).long()).float().item())
 
             n = 16 if tag=='valid' else 8
             y = torch.cat(audio[:1+n//audio[0].shape[0]], 0)[:n].reshape(-1)

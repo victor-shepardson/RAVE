@@ -1,24 +1,25 @@
+from typing import List
+from time import time
+
 import torch
 import torch.nn as nn
+from torch.cuda.amp import autocast, GradScaler
 from torch import Tensor
-from typing import List
+
+import numpy as np
+import pytorch_lightning as pl
+from sklearn.decomposition import PCA
+from einops import rearrange
+
+import cached_conv as cc
+
 # import torch.nn.utils.weight_norm as wn
 # from torch.nn.utils import remove_weight_norm
 from .weight_norm import weight_norm as wn
 from .weight_norm import remove_weight_norm
-import numpy as np
-import pytorch_lightning as pl
 from .core import multiscale_stft, Loudness, mod_sigmoid
 from .core import amp_to_impulse_response, fft_convolve, get_beta_kl_cyclic_annealed, get_beta_kl
 from .pqmf import CachedPQMF as PQMF
-from sklearn.decomposition import PCA
-from einops import rearrange
-
-from time import time
-import itertools as it
-
-import cached_conv as cc
-
 
 class Profiler:
     def __init__(self):
@@ -552,54 +553,6 @@ class Discriminator(nn.Module):
             feature.append(x)
         return feature
 
-# class Discriminator(nn.Module):
-#     def __init__(self, in_size, capacity, multiplier, n_layers):
-#         super().__init__()
-
-#         out_size = capacity
-
-#         net = [
-#             wn(cc.Conv1d(in_size, out_size, 15, padding=cc.get_padding(15)))
-#         ]
-#         net.append(nn.LeakyReLU(.2))
-
-#         for i in range(n_layers):
-#             in_size = out_size
-#             out_size = min(1024, in_size*multiplier)
-
-#             net.append(
-#                 wn(
-#                     cc.Conv1d(
-#                         in_size,
-#                         out_size,
-#                         41,
-#                         stride=multiplier,
-#                         padding=cc.get_padding(41, multiplier),
-#                         groups=out_size//capacity
-#                     )))
-#             net.append(nn.LeakyReLU(.2))
-
-#         net.append(
-#             wn(
-#                 cc.Conv1d(
-#                     out_size,
-#                     out_size,
-#                     5,
-#                     padding=cc.get_padding(5),
-#                 )))
-#         net.append(nn.LeakyReLU(.2))
-#         net.append(
-#             wn(cc.Conv1d(out_size, 1, 1)))
-#         self.net = nn.ModuleList(net)
-
-#     def forward(self, x):
-#         feature = []
-#         for layer in self.net:
-#             x = layer(x)
-#             if isinstance(layer, nn.Conv1d):
-#                 feature.append(x)
-#         return feature
-
 
 class StackDiscriminators(nn.Module):
     def __init__(self, n_dis, *args, factor=2, **kwargs):
@@ -637,6 +590,7 @@ class RAVE(pl.LightningModule):
                  ged,
                  adversarial_loss,
                  freeze_encoder,
+                 use_norm_dist,
                  warmup,
                 #  kl_cycle,
                  mode,
@@ -654,7 +608,8 @@ class RAVE(pl.LightningModule):
                  gen_adam_betas=(0.5,0.9),
                  dis_adam_betas=(0.5,0.9),
                  grad_clip=None,
-                 script=True
+                 script=True,
+                 amp=False
                 ):
         super().__init__()
         self.save_hyperparameters()
@@ -746,6 +701,8 @@ class RAVE(pl.LightningModule):
         if cropped_latent_size:
             self.crop_latent_space(cropped_latent_size)
 
+        self.scaler = GradScaler(enabled=amp)
+
     def init_buffers(self):
         self.register_buffer("latent_pca", torch.eye(self.latent_size))
         self.register_buffer("latent_mean", torch.zeros(self.latent_size))
@@ -797,9 +754,12 @@ class RAVE(pl.LightningModule):
         # batch through the stft
         stfts = multiscale_stft(torch.cat(parts), scales, .75)
         if y2 is None:
+            dist = (
+                self.norm_lin_distance if self.hparams['use_norm_dist'] 
+                else self.lin_distance)
             x, y = zip(*(s.chunk(2) for s in stfts))
             # lin = sum(map(self.norm_lin_distance, x, y))
-            lin = sum(map(self.lin_distance, x, y))
+            lin = sum(map(dist, x, y))
             log = sum(map(self.log_distance, x, y))
         else:
             x, y, y2 = zip(*(s.chunk(3) for s in stfts))
@@ -898,18 +858,20 @@ class RAVE(pl.LightningModule):
         double_z = use_ged or (use_pairs and use_discriminator)
 
         # ENCODE INPUT
-        if freeze_encoder:
-            self.encoder.eval()
-            with torch.no_grad():
+        with autocast(enabled=self.hparams['amp']):
+            if freeze_encoder:
+                self.encoder.eval()
+                with torch.no_grad():
+                    z, kl = self.reparametrize(*self.split_params(self.encoder(x, double=double_z)))
+            else:
                 z, kl = self.reparametrize(*self.split_params(self.encoder(x, double=double_z)))
-        else:
-            z, kl = self.reparametrize(*self.split_params(self.encoder(x, double=double_z)))
         kl = kl.sum() if kl is not None else 0
 
         z = self.pad_latent(z)
 
         # DECODE LATENT
-        y = self.decoder(z, add_noise=self.hparams['use_noise'])
+        with autocast(enabled=self.hparams['amp']):
+            y = self.decoder(z, add_noise=self.hparams['use_noise'])
 
         if double_z:
             y, y2 = y.chunk(2)
@@ -962,7 +924,9 @@ class RAVE(pl.LightningModule):
                 to_disc = torch.cat((target, y, y2))
             if not use_pairs and not use_ged:
                 to_disc = torch.cat((target, y))
-            discs_features = self.discriminator(to_disc)
+
+            with autocast(enabled=self.hparams['amp']):
+                discs_features = self.discriminator(to_disc)
 
             # all but final layer in each parallel discriminator
             # sum is doing list concatenation here
@@ -1039,17 +1003,20 @@ class RAVE(pl.LightningModule):
 
         if is_disc_step:
             dis_opt.zero_grad()
-            loss_dis.backward()
+            self.scaler.scale(loss_dis).backward()
+            # loss_dis.backward()
 
             if grad_clip is not None:
                 dis_grad = nn.utils.clip_grad_norm_(
                     self.discriminator.parameters(), grad_clip)
                 self.log('grad_norm_discriminator', dis_grad)
 
-            dis_opt.step()
+            self.scaler.step(dis_opt)
+            # dis_opt.step()
         else:
             gen_opt.zero_grad()
-            loss_gen.backward()
+            self.scaler.scale(loss_gen).backward()
+            # loss_gen.backward()
 
             if grad_clip is not None:
                 if not freeze_encoder:
@@ -1060,7 +1027,10 @@ class RAVE(pl.LightningModule):
                     self.decoder.parameters(), grad_clip)
                 self.log('grad_norm_generator', dec_grad)
 
-            gen_opt.step()
+            self.scaler.step(gen_opt)
+            # gen_opt.step()
+
+        self.scaler.update()
                
         p.tick("optimization")
 

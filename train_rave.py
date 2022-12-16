@@ -119,6 +119,8 @@ if __name__ == "__main__":
         MODE = "hinge"
         # stop encoder training
         FREEZE_ENCODER = False
+        # whether to use the original normalized linear distance when not using GED
+        USE_NORM_DIST = False
 
         # this only affects KL annealing schedule now
         WARMUP = setting(default=500000, small=500000, large=1500000)
@@ -160,6 +162,10 @@ if __name__ == "__main__":
         # L2 norm to clip gradient
         # (separately for encoder, generator, discriminator)
         GRAD_CLIP = None
+        # automatic mixed precision training
+        AMP = False
+        #
+        CUDNN_BENCHMARK = True
 
         # descriptive name for run
         NAME = None
@@ -224,6 +230,7 @@ if __name__ == "__main__":
             ged=args.GED,
             adversarial_loss=args.ADVERSARIAL_LOSS,
             freeze_encoder=args.FREEZE_ENCODER,
+            use_norm_dist=args.USE_NORM_DIST,
             warmup=args.WARMUP,
             # kl_cycle=args.KL_CYCLE,
             mode=args.MODE,
@@ -240,6 +247,7 @@ if __name__ == "__main__":
             gen_adam_betas=args.GEN_ADAM_BETAS,
             dis_adam_betas=args.DIS_ADAM_BETAS,
             grad_clip=args.GRAD_CLIP,
+            amp=args.AMP
         )
 
     x = {
@@ -419,44 +427,62 @@ if __name__ == "__main__":
         val_check["check_val_every_n_epoch"] = nepoch
     print(val_check)
 
-    trainer = pl.Trainer(
-        logger=pl.loggers.TensorBoardLogger(
-            path.join(args.LOGDIR, args.NAME), name="rave"),
-        gpus=use_gpu,
-        callbacks=[regular_checkpoint, last_checkpoint],
-        # callbacks=[validation_checkpoint, last_checkpoint],
-        max_epochs=100000,
-        max_steps=args.MAX_STEPS,
-        num_sanity_val_steps=4,
-        log_every_n_steps=10,
-        **val_check,
-    )
-
     # run = search_for_run(args.CKPT, mode="epoch")
     run = search_for_run(args.CKPT, mode="last")
     # if run is None: run = search_for_run(args.CKPT, mode="best")
     if run is not None:
         step = torch.load(run, map_location='cpu')["global_step"]
+    print(f'{step=}')
+
+    trainer = pl.Trainer(
+        logger=pl.loggers.TensorBoardLogger(
+            path.join(args.LOGDIR, args.NAME), name="rave"),
+        gpus=use_gpu,
+        benchmark=args.CUDNN_BENCHMARK,
+        callbacks=[regular_checkpoint, last_checkpoint],
+        # callbacks=[validation_checkpoint, last_checkpoint],
+        max_epochs=100000,
+        max_steps=step+11 if args.PROFILE else args.MAX_STEPS,
+        num_sanity_val_steps=4,
+        log_every_n_steps=10,
+        **val_check,
+    )
+
+    if run is not None:
         trainer.fit_loop.epoch_loop._batches_that_stepped = step #???
 
     # trainer.fit(model, train, [val, test], ckpt_path=run)
+
+    # if args.PROFILE:
+    #     model.cuda()
+    #     from torch.profiler import profile, ProfilerActivity
+    #     from torch.cuda import nvtx
+    #     it = iter(train)
+    #     def step():
+    #         batch = next(it)
+    #         batch = {k:v.to(device='cuda',non_blocking=True) for k,v in batch.items()}
+    #         nvtx.range_push('step')
+    #         model.training_step(batch, 0)
+    #         nvtx.range_pop()
+    #     for _ in range(8):
+    #         step()
+    #     with profile(
+    #         activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+    #         with_stack=True
+    #         ) as prof:
+    #         for _ in range(3):
+    #             step()
+    #     prof.export_chrome_trace("rave_trace.json")
+
     if args.PROFILE:
-        model.cuda()
         from torch.profiler import profile, ProfilerActivity
-        from torch.cuda import nvtx
-        it = iter(train)
-        def step():
-            batch = next(it)
-            batch = {k:v.to(device='cuda',non_blocking=True) for k,v in batch.items()}
-            nvtx.range_push('step')
-            model.training_step(batch, 0)
-            nvtx.range_pop()
-        for _ in range(8):
-            step()
+        # from torch.cuda import nvtx
         with profile(
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
-            for _ in range(4):
-                step()
-        prof.export_chrome_trace("trace.json")
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            with_stack=True
+            ) as prof:
+            trainer.fit(model, train, [val, test], ckpt_path=run)
+        prof.export_chrome_trace("rave_trace.json")
     else:
         trainer.fit(model, train, [val, test], ckpt_path=run)
+

@@ -64,6 +64,7 @@ class Loop(nn.Module):
     n_loops:int
     context:int
     feature_size:int
+    limit_margin:float
 
     def __init__(self, 
             index:int,
@@ -81,6 +82,8 @@ class Loop(nn.Module):
         self.n_fit = n_fit
         self.n_latent = n_latent
 
+        self.limit_margin = 0.1
+
         max_n_feature = n_loops * n_context * n_latent
 
         super().__init__()
@@ -90,6 +93,10 @@ class Loop(nn.Module):
         self.register_buffer('center', 
             torch.empty(max_n_feature, requires_grad=False))
         self.register_buffer('bias', 
+            torch.empty(n_latent, requires_grad=False))
+        self.register_buffer('z_min', 
+            torch.empty(n_latent, requires_grad=False))
+        self.register_buffer('z_max', 
             torch.empty(n_latent, requires_grad=False))
 
         # long-term memory stored at record-end
@@ -106,6 +113,8 @@ class Loop(nn.Module):
         self.weights.zero_()
         self.bias.zero_()
         self.center.zero_()
+        self.z_min.fill_(-torch.inf)
+        self.z_max.fill_(torch.inf)
 
     def feat_process(self, x, fit:bool=False):
         fs = x.shape[1]#self.feature_size
@@ -163,6 +172,9 @@ class Loop(nn.Module):
         b = z.mean(0)
         self.bias[:] = b
 
+        self.z_min[:] = z.min(0).values
+        self.z_max[:] = z.max(0).values
+
         r = torch.linalg.lstsq(feature, z-b, driver='gelsd')
         w = r.solution
         self.weights[:fs] = w
@@ -193,6 +205,8 @@ class Loop(nn.Module):
         z = self.feat_process(feature) @ w + b
 
         z = self.target_process_inv(z).squeeze(0)
+
+        z = z.clamp(self.z_min-self.limit_margin, self.z_max+self.limit_margin)
 
         return z
 

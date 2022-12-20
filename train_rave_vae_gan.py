@@ -166,11 +166,11 @@ if __name__ == "__main__":
         LOGDIR = "runs"
 
         # data augmentation
-        AUG_DISTORT_CHANCE = 0
+        AUG_DISTORT_CHANCE = 0.0
         AUG_DISTORT_GAIN = 32
         AUG_SPEED_CHANCE = 0.9
         AUG_SPEED_SEMITONES = 0.1
-        AUG_DELAY_CHANCE = 0
+        AUG_DELAY_CHANCE = 0.0
         AUG_DELAY_SAMPLES = 512
         AUG_GAIN_DB = 12
 

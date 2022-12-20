@@ -532,7 +532,7 @@ if args.CKPT is not None:
     logging.info(f"using {ckpt}")
 
     # debug_kw = {}
-    debug_kw = {'script':False}#, 'cropped_latent_size':36, 'latent_size':128} ###DEBUG
+    debug_kw = {'script':False, 'use_norm_dist':False}#, 'cropped_latent_size':36, 'latent_size':128} ###DEBUG
     # debug_kw = {'cropped_latent_size':8, 'latent_size':128} ###DEBUG
 
     model = RAVE.load_from_checkpoint(ckpt, **debug_kw, strict=False).eval()

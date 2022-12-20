@@ -758,7 +758,6 @@ class RAVE(pl.LightningModule):
                 self.norm_lin_distance if self.hparams['use_norm_dist'] 
                 else self.lin_distance)
             x, y = zip(*(s.chunk(2) for s in stfts))
-            # lin = sum(map(self.norm_lin_distance, x, y))
             lin = sum(map(dist, x, y))
             log = sum(map(self.log_distance, x, y))
         else:
@@ -1081,7 +1080,7 @@ class RAVE(pl.LightningModule):
     def decode(self, z):
         z = self.pad_latent(z)
 
-        y = self.decoder(z, add_noise=True)
+        y = self.decoder(z, add_noise=self.hparams['use_noise'])
         if self.pqmf is not None:
             y = self.pqmf.inverse(y)
         return y

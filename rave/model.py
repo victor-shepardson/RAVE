@@ -165,17 +165,21 @@ class NoiseGenerator(nn.Module):
         cum_delay = 0
         for i, r in enumerate(ratios):
             net.append(
+                wn(
                 cc.Conv1d(
                     channels[i],
                     channels[i + 1],
                     # 3,
                     # padding=cc.get_padding(3, r, mode=padding_mode),
                     # stride=r,
-                    2 * r + 1,
-                    padding = (r + 1, 0),
-                    stride=r,
+                    # 2 * r + 1,
+                    # padding = (r + 1, 0),
+                    # stride=r,
+                    r, stride=r,
                     cumulative_delay=cum_delay,
-                ))
+                )
+                )
+            )
             cum_delay = net[-1].cumulative_delay
             if i != len(ratios) - 1:
                 net.append(nn.LeakyReLU(.2))
@@ -192,8 +196,9 @@ class NoiseGenerator(nn.Module):
 
     def forward(self, x):
         amp = mod_sigmoid(self.net(x) - 5)
-        amp = amp.permute(0, 2, 1)
+        amp = amp.permute(0, 2, 1) # batch, time, channel
         amp = amp.reshape(amp.shape[0], amp.shape[1], self.data_size, -1)
+        # batch, time/prod(ratios), pqmf_band, noise_band
 
         ir = amp_to_impulse_response(amp, self.target_size)
         noise = torch.rand_like(ir) * 2 - 1
@@ -737,7 +742,8 @@ class RAVE(pl.LightningModule):
         # return torch.norm(x - y) / torch.norm(x)
         # norm = lambda z: torch.linalg.vector_norm(z, dim=(-1,-2,-3))
         norm = lambda z: torch.linalg.vector_norm(z, dim=tuple(range(1, z.ndim)))
-        return (norm(x - y) / norm(x)).mean()
+        # return (norm(x - y) / norm(x)).mean()
+        return (norm(x - y) / (1e-3+norm(x))).mean()
 
     def log_distance(self, x, y):
         return abs(torch.log(x + 1e-7) - torch.log(y + 1e-7)).mean()

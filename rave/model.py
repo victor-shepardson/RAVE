@@ -63,6 +63,7 @@ class ResidualStack(nn.Module):
                  bias=False,
                  depth=3,
                  boom=2,
+                 group_size=128,
                  script=False):
         super().__init__()
         net = []
@@ -87,7 +88,7 @@ class ResidualStack(nn.Module):
                         ),
                         dilation=3**i,
                         bias=bias,
-                        groups=dim//min(dim, 16),
+                        groups=max(1, dim//group_size)#4#dim//min(dim, 16),
                     )))
 
             seq.append(nn.LeakyReLU(.2))
@@ -125,31 +126,46 @@ class UpsampleLayer(nn.Module):
                  bias=False):
         super().__init__()
         net = []#[nn.LeakyReLU(.2)]
+        ## stride
         if ratio > 1:
-            net.append(nn.Upsample(scale_factor=ratio))
-            # net.append(
-                # wn(
-                #     cc.ConvTranspose1d(
-                #         in_dim,
-                #         out_dim,
-                #         2 * ratio,
-                #         stride=ratio,
-                #         padding=ratio // 2,
-                #         bias=bias,
-                #     )))
-        # else:
-        net.append(
-            wn(
-                cc.Conv1d(
-                    in_dim,
-                    out_dim,
-                    # 3,
-                    # padding=cc.get_padding(3, mode=padding_mode),
-                    2*ratio+1,
-                    padding=cc.get_padding(2*ratio+1, mode=padding_mode),
-                    bias=bias,
-                )))
-
+            # net.append(wn(cc.Conv1d(
+                # in_dim, in_dim, 1, padding=(1,0), groups=max(1, in_dim//256))))
+            net.append(
+                cc.CachedPadding1d(1) if cc.USE_BUFFER_CONV
+                else nn.ConstantPad1d((1,0), 0.))
+            net.append(
+                wn(
+                    cc.ConvTranspose1d(
+                        in_dim,
+                        out_dim,
+                        2 * ratio,
+                        stride=ratio,
+                        padding=ratio,
+                        bias=bias,
+                        # groups=max(1, out_dim//256)#out_dim//8
+                    )))
+        else:
+            net.append(
+                wn(
+                    cc.Conv1d(
+                        in_dim,
+                        out_dim,
+                        3,
+                        padding=cc.get_padding(3, mode=padding_mode),
+                        bias=bias,
+                    )))
+        ## Upsample
+        # if ratio > 1:
+        #     net.append(nn.Upsample(scale_factor=ratio))
+        # net.append(
+        #     wn(
+        #         cc.Conv1d(
+        #             in_dim,
+        #             out_dim,
+        #             2*ratio+1,
+        #             padding=cc.get_padding(2*ratio+1, mode=padding_mode),
+        #             bias=bias,
+        #         )))
         self.net = cc.CachedSequential(*net)
         self.cumulative_delay = self.net.cumulative_delay + cumulative_delay * ratio
 
@@ -213,6 +229,7 @@ class Generator(nn.Module):
                  latent_size,
                  capacity,
                  boom,
+                 group_size,
                  data_size,
                  ratios,
                  narrow,
@@ -261,6 +278,7 @@ class Generator(nn.Module):
                     padding_mode,
                     cumulative_delay=net[-1].cumulative_delay,
                     boom=boom,
+                    group_size=group_size,
                     script=script
                 ))
 
@@ -344,6 +362,7 @@ class Encoder(nn.Module):
                  data_size,
                  capacity,
                  boom,
+                 group_size,
                  latent_size,
                  ratios,
                  narrow,
@@ -398,6 +417,7 @@ class Encoder(nn.Module):
                     cumulative_delay=net[prev_layer_idx].cumulative_delay,
                     depth=1,
                     boom=boom,
+                    group_size=group_size,
                     script=script
                 ))
             net.append(maybe_wn(
@@ -599,6 +619,7 @@ class RAVE(pl.LightningModule):
                  warmup,
                 #  kl_cycle,
                  mode,
+                 group_size=64,
                  encoder_norm=None,
                  no_latency=False,
                  min_kl=1e-4,
@@ -632,6 +653,7 @@ class RAVE(pl.LightningModule):
             data_size,
             capacity,
             boom,
+            group_size,
             latent_size,
             ratios,
             narrow,
@@ -644,6 +666,7 @@ class RAVE(pl.LightningModule):
             latent_size,
             capacity,
             boom,
+            group_size,
             data_size,
             list(reversed(ratios)),
             list(reversed(narrow)),

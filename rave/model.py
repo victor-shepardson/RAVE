@@ -1086,7 +1086,7 @@ class RAVE(pl.LightningModule):
             y = self.pqmf.inverse(y)
         return y
 
-    def validation_step(self, batch, batch_idx, loader_idx):
+    def validation_step(self, batch, batch_idx, loader_idx=0):
             
         x = batch['source'].unsqueeze(1)
         target = batch['target'].unsqueeze(1)
@@ -1275,6 +1275,9 @@ class RAVE(pl.LightningModule):
         
 
     def validation_epoch_end(self, outs):
+        # fragile workaround for lightning nonsense (handle case when no test set)
+        if len(outs)!=2: outs = [outs]
+
         for (out, tag) in zip(outs, ('valid', 'test')):
 
             audio, z, klds = list(zip(*out))

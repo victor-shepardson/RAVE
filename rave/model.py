@@ -367,6 +367,7 @@ class Encoder(nn.Module):
                  ratios,
                  narrow,
                  padding_mode,
+                 latent_params=2, # mean, scale
                  norm=None,
                  bias=False,
                  script=True,
@@ -395,8 +396,6 @@ class Encoder(nn.Module):
             norm = lambda d: nn.InstanceNorm1d(d, track_running_stats=True)
         elif norm=='layer':
             norm = lambda d: LayerNorm1d()
-
-        latent_params = 2 # mean, scale
 
         for i,(r, n) in enumerate(zip(ratios, narrow)):
             in_dim = out_dim
@@ -434,20 +433,22 @@ class Encoder(nn.Module):
             # net.append(nn.AvgPool1d(r,r))
             # net.append(nn.MaxPool1d(r,r))
 
-            
         net.append(nn.LeakyReLU(0.2)) 
 
-        net.append(maybe_wn(
-            cc.Conv1d(
+        final_layer = cc.Conv1d(
                 out_dim,
                 latent_size * latent_params,
                 3,
-                padding=cc.get_padding(3, mode=padding_mode),
+                padding=(2,0),
                 groups=latent_params,
                 bias=bias,
                 cumulative_delay=net[-2].cumulative_delay,
                 # cumulative_delay=net[-3].cumulative_delay,
-            )))
+            )
+        with torch.no_grad():
+            final_layer.weight.mul_(1e-2)
+
+        net.append(maybe_wn(final_layer))
 
         self.net = cc.CachedSequential(*net)
         self.cumulative_delay = self.net.cumulative_delay
@@ -456,77 +457,32 @@ class Encoder(nn.Module):
         z = self.net(x)
         # duplicate along batch dimension
         if double:
-            # z = z.repeat(2, *(1,)*(z.ndim-1))
             z = z.repeat(2, 1, 1)
-        # split into mean, scale parameters along channel dimension
-        # if use_scale:
-            # return torch.split(z, z.shape[1] // 2, 1)
-            # return z.chunk(2, 1)
-        # else:
-            # return z, None
         return z
 
-# class Encoder(nn.Module):
-#     def __init__(self,
-#                  data_size,
-#                  capacity,
-#                  latent_size,
-#                  ratios,
-#                  padding_mode,
-#                  use_bn,
-#                  bias=False):
-#         super().__init__()
-#         maybe_wn = (lambda x:x) if use_bn else wn
+class Prior(nn.Module):
+    def __init__(self, latent_size, latent_params, n_layers=2, h=512, k_in=5, k=3):
+        super().__init__()
 
-#         net = [
-#             maybe_wn(cc.Conv1d(
-#                 data_size,
-#                 capacity,
-#                 7,
-#                 padding=cc.get_padding(7, mode=padding_mode),
-#                 bias=bias))
-#             ]
+        net = [wn(cc.Conv1d(latent_size, h, k_in, padding=(k_in,0)))]
 
-#         for i, r in enumerate(ratios):
-#             in_dim = 2**i * capacity
-#             out_dim = 2**(i + 1) * capacity
+        for _ in range(n_layers):
+            net.append(Residual(cc.CachedSequential(
+                nn.LeakyReLU(0.2),
+                wn(cc.Conv1d(h, h, k, padding=(k-1,0)))
+                )))
 
-#             if use_bn:
-#                 net.append(nn.BatchNorm1d(in_dim))
-#             net.append(nn.LeakyReLU(.2))
-#             net.append(maybe_wn(
-#                 cc.Conv1d(
-#                     in_dim,
-#                     out_dim,
-#                     2 * r + 1,
-#                     padding=cc.get_padding(2 * r + 1, r, mode=padding_mode),
-#                     stride=r,
-#                     bias=bias,
-#                     cumulative_delay=net[-3 if use_bn else -2].cumulative_delay,
-#                 )))
+        net.append(nn.LeakyReLU(0.2))
 
-#         net.append(nn.LeakyReLU(.2))
-#         net.append(maybe_wn(
-#             cc.Conv1d(
-#                 out_dim,
-#                 2 * latent_size,
-#                 5,
-#                 padding=cc.get_padding(5, mode=padding_mode),
-#                 groups=2,
-#                 bias=bias,
-#                 cumulative_delay=net[-2].cumulative_delay,
-#             )))
+        final_layer = cc.Conv1d(h, latent_size*latent_params, k, padding=(k-1,0))
+        with torch.no_grad():
+            final_layer.weight.mul_(1e-2)
+        net.append(wn(final_layer))
 
-#         self.net = cc.CachedSequential(*net)
-#         self.cumulative_delay = self.net.cumulative_delay
+        self.net = cc.CachedSequential(*net)
 
-#     def forward(self, x, double=False):
-#         z = self.net(x)
-#         # duplicate along batch dimension
-#         if double:
-#             z = z.repeat(2, *(1,)*(z.ndim-1))
-#         # split into mean, scale parameters along channel dimension
-#         return torch.split(z, z.shape[1] // 2, 1)
+    def forward(self, z):
+        return self.net(z)
 
 
 class Discriminator(nn.Module):
@@ -619,6 +575,7 @@ class RAVE(pl.LightningModule):
                  warmup,
                 #  kl_cycle,
                  mode,
+                 beta_moment=1e-4,
                  group_size=64,
                  encoder_norm=None,
                  no_latency=False,
@@ -649,6 +606,8 @@ class RAVE(pl.LightningModule):
 
         self.loudness = Loudness(sr, 512)
 
+        latent_params = 2
+
         self.encoder = Encoder(
             data_size,
             capacity,
@@ -658,6 +617,7 @@ class RAVE(pl.LightningModule):
             ratios,
             narrow,
             "causal" if no_latency else "centered",
+            latent_params,
             encoder_norm,
             bias,
             script,
@@ -677,6 +637,8 @@ class RAVE(pl.LightningModule):
             bias,
             script,
         )
+
+        self.prior = Prior(latent_size, latent_params)
 
         # print('encoder')
         # for n,p in self.encoder.named_parameters():
@@ -804,35 +766,33 @@ class RAVE(pl.LightningModule):
         return lin + log
 
     def reparametrize(self, mean, scale):
-
         if self.cropped_latent_size > 0:
-            z = mean
-            kl = None
+            return mean
         else:
             if scale is None:
                 raise ValueError("""
                     in `reparametrize`:
                     `scale` should not be None while `self.cropped_latent_size` is 0
                 """)
-            if self.hparams['sample_kl']:
-                log_std = scale.clamp(-50, 3)
-                u = torch.randn_like(mean)
-                z = u * log_std.exp() + mean
-                if self.hparams['path_derivative']:
-                    log_std = log_std.detach()
-                    mean = mean.detach()
-                    _u = (z - mean) / log_std.exp()
-                    kl = (0.5*(z*z - _u*_u) - log_std).mean((0, 2))
-                else:
-                    kl = (0.5*(z*z - u*u) - log_std).mean((0, 2))
-            else:
-                std = nn.functional.softplus(scale) + 1e-4
-                var = std * std
-                logvar = torch.log(var)
-                z = torch.randn_like(mean) * std + mean
-                kl = 0.5 * (mean * mean + var - logvar - 1).mean((0, 2))
+            log_std = scale.clamp(-50, 3)
+            u = torch.randn_like(mean)
+            return u * log_std.exp() + mean
 
-        return z, kl
+    def neg_log_dens(self, z, mean, scale):
+        log_std = scale.clamp(-50, 3)
+        c = (z-mean)/log_std.exp()
+        return log_std + c*c/2
+
+    def kld(self, z, q_mean, q_scale, p_mean, p_scale):
+        # for t in (z, q_mean, q_scale, p_mean, p_scale):
+            # print(t.shape)
+        dens_p = self.neg_log_dens(z, p_mean, p_scale)
+        dens_q = self.neg_log_dens(z, q_mean, q_scale)
+        kl = dens_p - dens_q
+        return kl.mean((0,2)) # mean over batch and time
+
+    def moment_loss(self, z):
+        return z.mean((0,2)).abs() + (z.std((0,2)) - 1).abs()
 
     def adversarial_combine(self, score_real, score_fake, mode="hinge"):
         if mode == "hinge":
@@ -885,14 +845,21 @@ class RAVE(pl.LightningModule):
         freeze_encoder = self.hparams['freeze_encoder']
         double_z = use_ged or (use_pairs and use_discriminator)
 
+        def encode():
+            q_params = self.split_params(self.encoder(x, double=double_z))
+            z = self.reparametrize(*q_params)
+            p_params = self.split_params(self.prior(z)[...,:-1])
+            kl = self.kld(z, *q_params, *p_params)
+            return z, kl
+
         # ENCODE INPUT
         with autocast(enabled=self.hparams['amp']):
             if freeze_encoder:
                 self.encoder.eval()
                 with torch.no_grad():
-                    z, kl = self.reparametrize(*self.split_params(self.encoder(x, double=double_z)))
+                    z, kl = encode()
             else:
-                z, kl = self.reparametrize(*self.split_params(self.encoder(x, double=double_z)))
+                z, kl = encode()
         kl = kl.sum() if kl is not None else 0
 
         z = self.pad_latent(z)
@@ -1013,7 +980,9 @@ class RAVE(pl.LightningModule):
             self.global_step, self.hparams['warmup'], self.min_kl, self.max_kl)
         loss_kld = beta * kl
 
-        loss_gen = distance + loss_kld
+        loss_moment = self.moment_loss(z).mean() * self.hparams['beta_moment']
+
+        loss_gen = distance + loss_kld + loss_moment
         if self.hparams['adversarial_loss']:
             loss_gen = loss_gen + loss_adv
         if self.feature_match:
@@ -1068,6 +1037,8 @@ class RAVE(pl.LightningModule):
 
         # KLD loss (KLD in nats per z * beta)
         self.log("loss_kld", loss_kld)
+        # moment matching loss
+        self.log("loss_moment", loss_moment)
         # spectral + loudness distance loss
         self.log("loss_distance", distance)
         # loudness distance loss
@@ -1103,7 +1074,7 @@ class RAVE(pl.LightningModule):
 
         params = self.encoder(x)
 
-        z, _ = self.reparametrize(*self.split_params(params))
+        z = self.reparametrize(*self.split_params(params))
         return z
 
     def decode(self, z):
@@ -1123,22 +1094,24 @@ class RAVE(pl.LightningModule):
             x = self.pqmf(x)
             target = self.pqmf(target)
 
-        p = self.encoder(x)
-        mean, scale = self.split_params(p)
+        q_mean, q_scale = self.split_params(self.encoder(x))
 
         if loader_idx > 0:
             # z = mean
-            z = torch.cat((
-                mean, 
-                mean + torch.randn((*mean.shape[:2], 1), device=mean.device)/2),
+            z = q_mean
+            to_decode = torch.cat((
+                z, 
+                z + torch.randn((*q_mean.shape[:2], 1), device=q_mean.device)/2),
                 0)
-            _, kl = self.reparametrize(mean, scale)
         else:
-            z, kl = self.reparametrize(mean, scale)
+            z = to_decode = self.reparametrize(q_mean, q_scale)
 
-        z = self.pad_latent(z)
+        p_mean, p_scale = self.split_params(self.prior(z)[...,:-1])
+        kl = self.kld(z, q_mean, q_scale, p_mean, p_scale)
 
-        y = self.decoder(z, add_noise=self.hparams['use_noise'])
+        to_decode = self.pad_latent(to_decode)
+
+        y = self.decoder(to_decode, add_noise=self.hparams['use_noise'])
         # print(x.shape, z.shape, y.shape)
 
 
@@ -1165,9 +1138,9 @@ class RAVE(pl.LightningModule):
         
 
         if loader_idx==0:
-            return torch.cat([y, target], -1), mean, kl
+            return torch.cat([y, target], -1), q_mean, kl
         if loader_idx>0:
-            return torch.cat([y, target, y2], -1), mean, None
+            return torch.cat([y, target, y2], -1), q_mean, None
 
     def block_size(self):
         return np.prod(self.hparams['ratios']) * self.hparams['data_size'] 

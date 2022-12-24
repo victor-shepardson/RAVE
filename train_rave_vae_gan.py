@@ -54,7 +54,7 @@ if __name__ == "__main__":
         # reduction in data dim in encoder / increase (reversed) in generator
         NARROW = [1,1,1,1,2,2,2]
         #low and high values for the cyclic beta-VAE objective
-        MIN_KL = 1e-4
+        MIN_KL = 1e-6
         MAX_KL = 1e-1
         # use a different parameterization and compute the sample KLD instead of analytic
         SAMPLE_KL = True
@@ -166,11 +166,11 @@ if __name__ == "__main__":
         LOGDIR = "runs"
 
         # data augmentation
-        AUG_DISTORT_CHANCE = 0
+        AUG_DISTORT_CHANCE = 0.0
         AUG_DISTORT_GAIN = 32
         AUG_SPEED_CHANCE = 0.9
         AUG_SPEED_SEMITONES = 0.1
-        AUG_DELAY_CHANCE = 0
+        AUG_DELAY_CHANCE = 0.0
         AUG_DELAY_SAMPLES = 512
         AUG_GAIN_DB = 12
 
@@ -368,7 +368,7 @@ if __name__ == "__main__":
             lambda x: x.astype(np.float32),
             no_split
         ]),
-    )
+    ) if args.TEST_PREPROCESSED is not None else None
 
     val = max((2 * len(dataset)) // 100, 1)
     train = len(dataset) - val
@@ -377,7 +377,7 @@ if __name__ == "__main__":
         [train, val],
         generator=torch.Generator().manual_seed(42),
     )
-    if args.N_TEST > 0:
+    if test is not None and args.N_TEST > 0:
         test = torch.utils.data.Subset(test, torch.randperm(
             len(test), generator=torch.Generator().manual_seed(42))[:args.N_TEST])
 
@@ -386,7 +386,8 @@ if __name__ == "__main__":
     num_workers = 0 if os.name == "nt" else 8
     train = DataLoader(train, args.BATCH, True, drop_last=True, num_workers=num_workers)
     val = DataLoader(val, args.BATCH, False, num_workers=num_workers)
-    test = DataLoader(test, args.BATCH//2, False, num_workers=num_workers)
+    if test is not None:
+        test = DataLoader(test, args.BATCH//2, False, num_workers=num_workers)
 
     # CHECKPOINT CALLBACKS
     # validation_checkpoint = pl.callbacks.ModelCheckpoint(
@@ -446,6 +447,10 @@ if __name__ == "__main__":
     if run is not None:
         trainer.fit_loop.epoch_loop._batches_that_stepped = step #???
 
+    val_sets = [val]
+    if test is not None:
+        val_sets.append(test)
+
     if args.PROFILE:
         from torch.profiler import profile, ProfilerActivity
         # from torch.cuda import nvtx
@@ -453,8 +458,8 @@ if __name__ == "__main__":
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
             with_stack=True
             ) as prof:
-            trainer.fit(model, train, [val, test], ckpt_path=run)
+            trainer.fit(model, train, val_sets, ckpt_path=run)
         prof.export_chrome_trace("rave_trace.json")
     else:
-        trainer.fit(model, train, [val, test], ckpt_path=run)
+        trainer.fit(model, train, val_sets, ckpt_path=run)
 

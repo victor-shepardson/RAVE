@@ -135,7 +135,7 @@ class UpsampleLayer(nn.Module):
                 else nn.ConstantPad1d((1,0), 0.))
             net.append(
                 wn(
-                    cc.ConvTranspose1d(
+                    nn.ConvTranspose1d(
                         in_dim,
                         out_dim,
                         2 * ratio,
@@ -144,6 +144,7 @@ class UpsampleLayer(nn.Module):
                         bias=bias,
                         # groups=max(1, out_dim//256)#out_dim//8
                     )))
+            net[-1].cumulative_delay = 0
         else:
             net.append(
                 wn(

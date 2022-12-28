@@ -227,7 +227,7 @@ x = torch.zeros(1, 1, 2**14)
 if model.pqmf is not None:
     x = model.pqmf(x)
 
-z, _ = model.reparametrize(*model.split_params(model.encoder(x)))
+z = model.reparametrize(*model.split_params(model.encoder(x)))
 
 if args.STEREO:
     z = z.expand(2, *z.shape[1:])

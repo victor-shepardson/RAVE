@@ -706,6 +706,7 @@ class RAVE(pl.LightningModule):
     def configure_optimizers(self):
         gen_p = list(self.encoder.parameters())
         gen_p += list(self.decoder.parameters())
+        gen_p += list(self.prior.parameters())
         gen_opt = torch.optim.Adam(
             gen_p, self.hparams['gen_lr'], self.hparams['gen_adam_betas'])
 

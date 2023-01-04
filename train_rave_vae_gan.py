@@ -56,11 +56,10 @@ if __name__ == "__main__":
         #low and high values for the cyclic beta-VAE objective
         MIN_KL = 1e-6
         MAX_KL = 1e-1
-        # use a different parameterization and compute the sample KLD instead of analytic
-        SAMPLE_KL = True
-        # use the kld term from http://arxiv.org/abs/1703.09194
-        # (SAMPLE_KL must be true)
-        PATH_DERIVATIVE = False
+        # weight KLD between causal prior and unit normal hyperprior
+        BETA_PRIOR = 1e-4
+        # decouple latent location+scale from encoder, decoder architectures
+        GIMBAL = False
         # if this is nonzero, crop the latent space before training
         # this will bake the stored PCA transformation into the encoder and decoder,
         # making the first CROPPED_LATENT_SIZE latents deterministic,
@@ -237,12 +236,12 @@ if __name__ == "__main__":
             warmup=args.WARMUP,
             # kl_cycle=args.KL_CYCLE,
             mode=args.MODE,
+            gimbal=args.GIMBAL,
             no_latency=args.NO_LATENCY,
             sr=args.SR,
             min_kl=args.MIN_KL,
             max_kl=args.MAX_KL,
-            sample_kl=args.SAMPLE_KL,
-            path_derivative=args.PATH_DERIVATIVE,
+            beta_prior=args.BETA_PRIOR,
             cropped_latent_size=args.CROPPED_LATENT_SIZE,
             feature_match=args.FEATURE_MATCH,
             gen_lr=args.GEN_LR,

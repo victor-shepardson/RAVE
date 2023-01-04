@@ -550,6 +550,17 @@ class StackDiscriminators(nn.Module):
             x = nn.functional.avg_pool1d(x, self.factor)
         return features
 
+class Gimbal(nn.Module):
+    def __init__(self, size):
+        super().__init__()
+        self.log_a = nn.Parameter(torch.zeros(size, 1))
+        self.b = nn.Parameter(torch.zeros(size, 1))
+
+    def forward(self, mean, log_scale):
+        return mean * self.log_a.exp() + self.b, log_scale + self.log_a
+
+    def inv(self, z):
+        return (z-self.b) / self.log_a.exp()
 
 class RAVE(pl.LightningModule):
     def __init__(self,
@@ -576,14 +587,13 @@ class RAVE(pl.LightningModule):
                  warmup,
                 #  kl_cycle,
                  mode,
-                 beta_moment=1e-4,
+                 gimbal=False,
                  group_size=64,
                  encoder_norm=None,
                  no_latency=False,
                  min_kl=1e-4,
                  max_kl=5e-1,
-                 sample_kl=False,
-                 path_derivative=False,
+                 beta_prior=1e-4,
                  cropped_latent_size=0,
                  feature_match=True,
                  sr=24000,
@@ -638,6 +648,11 @@ class RAVE(pl.LightningModule):
             bias,
             script,
         )
+
+        if gimbal:
+            self.gimbal = Gimbal(latent_size)
+        else:
+            self.gimbal = None
 
         self.prior = Prior(latent_size, latent_params)
 
@@ -702,11 +717,15 @@ class RAVE(pl.LightningModule):
         # by KLD, in descending order, computed at each validation step
         self.register_buffer("kld_idxs", 
             torch.zeros(self.latent_size, dtype=torch.long))
+        self.register_buffer("kld_values", torch.zeros(self.latent_size))
 
     def configure_optimizers(self):
         gen_p = list(self.encoder.parameters())
         gen_p += list(self.decoder.parameters())
         gen_p += list(self.prior.parameters())
+        if self.gimbal is not None:
+            gen_p += list(self.gimbal.parameters())
+
         gen_opt = torch.optim.Adam(
             gen_p, self.hparams['gen_lr'], self.hparams['gen_adam_betas'])
 
@@ -767,6 +786,9 @@ class RAVE(pl.LightningModule):
 
         return lin + log
 
+    def clip_log_scale(self, log_scale):
+        return log_scale.clamp(-14, 3)
+
     def reparametrize(self, mean, scale):
         if self.cropped_latent_size > 0:
             return mean
@@ -776,21 +798,23 @@ class RAVE(pl.LightningModule):
                     in `reparametrize`:
                     `scale` should not be None while `self.cropped_latent_size` is 0
                 """)
-            log_std = scale.clamp(-50, 3)
+            log_std = self.clip_log_scale(scale)
             u = torch.randn_like(mean)
             return u * log_std.exp() + mean
 
-    def neg_log_dens(self, z, mean, scale):
-        log_std = scale.clamp(-50, 3)
-        c = (z-mean)/log_std.exp()
-        return log_std + c*c/2
+    def log_dens(self, z, mean, scale):
+        log_std = self.clip_log_scale(scale)
+        return -0.5 * (z-mean)**2 * (-2*log_std).exp() - log_std
 
-    def kld(self, z, q_mean, q_scale, p_mean, p_scale):
-        # for t in (z, q_mean, q_scale, p_mean, p_scale):
-            # print(t.shape)
-        dens_p = self.neg_log_dens(z, p_mean, p_scale)
-        dens_q = self.neg_log_dens(z, q_mean, q_scale)
-        kl = dens_p - dens_q
+    def kld(self, z, q_mean, q_scale, p_mean=None, p_scale=None):
+        if p_mean is None:
+            p_mean = torch.zeros_like(q_mean)
+        if p_scale is None:
+            p_scale = torch.zeros_like(q_scale)
+
+        dens_p = self.log_dens(z, p_mean, p_scale)
+        dens_q = self.log_dens(z, q_mean, q_scale)
+        kl = dens_q - dens_p
         return kl.mean((0,2)) # mean over batch and time
 
     def moment_loss(self, z):
@@ -852,18 +876,22 @@ class RAVE(pl.LightningModule):
             z = self.reparametrize(*q_params)
             p_params = self.split_params(self.prior(z)[...,:-1])
             kl = self.kld(z, *q_params, *p_params)
-            return z, kl
+            kl_prior = self.kld(self.reparametrize(*p_params), *p_params)
+            return z, kl, kl_prior
 
         # ENCODE INPUT
         with autocast(enabled=self.hparams['amp']):
             if freeze_encoder:
                 self.encoder.eval()
                 with torch.no_grad():
-                    z, kl = encode()
+                    z, kl, kl_prior = encode()
             else:
-                z, kl = encode()
+                z, kl, kl_prior = encode()
         kl = kl.sum() if kl is not None else 0
+        kl_prior = kl_prior.sum() if kl_prior is not None else 0
 
+        if self.gimbal is not None:
+            z = self.gimbal.inv(z)
         z = self.pad_latent(z)
 
         # DECODE LATENT
@@ -982,9 +1010,12 @@ class RAVE(pl.LightningModule):
             self.global_step, self.hparams['warmup'], self.min_kl, self.max_kl)
         loss_kld = beta * kl
 
-        loss_moment = self.moment_loss(z).mean() * self.hparams['beta_moment']
+        beta_prior = self.hparams['beta_prior']
+        loss_kld_prior = beta_prior * kl_prior
 
-        loss_gen = distance + loss_kld + loss_moment
+        # loss_moment = self.moment_loss(z).mean() * self.hparams['beta_moment']
+
+        loss_gen = distance + loss_kld + loss_kld_prior#+ loss_moment
         if self.hparams['adversarial_loss']:
             loss_gen = loss_gen + loss_adv
         if self.feature_match:
@@ -1039,8 +1070,9 @@ class RAVE(pl.LightningModule):
 
         # KLD loss (KLD in nats per z * beta)
         self.log("loss_kld", loss_kld)
+        self.log("loss_kld_prior", loss_kld_prior)
         # moment matching loss
-        self.log("loss_moment", loss_moment)
+        # self.log("loss_moment", loss_moment)
         # spectral + loudness distance loss
         self.log("loss_distance", distance)
         # loudness distance loss
@@ -1048,8 +1080,10 @@ class RAVE(pl.LightningModule):
 
         # KLD in bits per second
         self.log("kld_bps", self.npz_to_bps(kl))
+        self.log("kld_bps_prior", self.npz_to_bps(kl_prior))
         # beta-VAE parameter
         self.log("beta", beta)
+        self.log("beta_prior", beta_prior)
 
         if use_discriminator:
             # total discriminator loss
@@ -1068,7 +1102,10 @@ class RAVE(pl.LightningModule):
     def split_params(self, p):
         if self.cropped_latent_size > 0:
             return p, None
-        return p.chunk(2,1)
+        params = p.chunk(2,1)
+        if self.gimbal is not None:
+            return self.gimbal(*params)
+        return params
 
     def encode(self, x):
         if self.pqmf is not None:
@@ -1080,6 +1117,8 @@ class RAVE(pl.LightningModule):
         return z
 
     def decode(self, z):
+        if self.gimbal is not None:
+            z = self.gimbal.inv(z)
         z = self.pad_latent(z)
 
         y = self.decoder(z, add_noise=self.hparams['use_noise'])
@@ -1111,11 +1150,12 @@ class RAVE(pl.LightningModule):
         p_mean, p_scale = self.split_params(self.prior(z)[...,:-1])
         kl = self.kld(z, q_mean, q_scale, p_mean, p_scale)
 
+        if self.gimbal is not None:
+            to_decode = self.gimbal.inv(to_decode)
         to_decode = self.pad_latent(to_decode)
 
         y = self.decoder(to_decode, add_noise=self.hparams['use_noise'])
         # print(x.shape, z.shape, y.shape)
-
 
         if self.pqmf is not None:
             x = self.pqmf.inverse(x)
@@ -1309,6 +1349,7 @@ class RAVE(pl.LightningModule):
                 klds = sum(klds) / len(klds)
                 klds, kld_idxs = klds.cpu().sort(descending=True)
                 self.kld_idxs[:] = kld_idxs
+                self.kld_values[:] = klds
                 kld_p = (klds / klds.sum()).cumsum(0)
                 # print(kld_p)
                 for p in var_p:

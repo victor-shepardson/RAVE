@@ -465,7 +465,7 @@ class Prior(nn.Module):
     def __init__(self, latent_size, latent_params, n_layers=2, h=512, k_in=5, k=3):
         super().__init__()
 
-        net = [wn(cc.Conv1d(latent_size, h, k_in, padding=(k_in,0)))]
+        net = [wn(cc.Conv1d(latent_size, h, k_in, padding=(k_in-1,0)))]
 
         for _ in range(n_layers):
             net.append(Residual(cc.CachedSequential(
@@ -874,7 +874,8 @@ class RAVE(pl.LightningModule):
         def encode():
             q_params = self.split_params(self.encoder(x, double=double_z))
             z = self.reparametrize(*q_params)
-            p_params = self.split_params(self.prior(z)[...,:-1])
+            shift_z = torch.cat((z.new_zeros((*z.shape[:2], 1)), z[...,:-1]), -1)
+            p_params = self.split_params(self.prior(shift_z))
             kl = self.kld(z, *q_params, *p_params)
             kl_prior = self.kld(self.reparametrize(*p_params), *p_params)
             return z, kl, kl_prior

@@ -219,9 +219,13 @@ class NoiseGenerator(nn.Module):
 
         ir = amp_to_impulse_response(amp, self.target_size)
         noise = torch.rand_like(ir) * 2 - 1
+        # batch, time/prod(ratios), pqmf_band, prod(ratios)
 
         noise = fft_convolve(noise, ir).permute(0, 2, 1, 3)
+        # batch, pqmf_band, time/prod(ratios), prod(ratios)
+
         noise = noise.reshape(noise.shape[0], noise.shape[1], -1)
+        # batch, pqmf_band, time
         return noise
 
 
@@ -334,7 +338,7 @@ class Generator(nn.Module):
         self.loud_stride = loud_stride
         self.cumulative_delay = self.synth.cumulative_delay
 
-    def forward(self, x, add_noise: bool = True):
+    def forward(self, x, add_noise: bool = True, return_parts: bool = False):
         x = self.net(x)
 
         if self.has_noise_branch:
@@ -346,7 +350,13 @@ class Generator(nn.Module):
         loudness = loudness.repeat_interleave(self.loud_stride)
         loudness = loudness.reshape(x.shape[0], 1, -1)
 
-        waveform = torch.tanh(waveform) * mod_sigmoid(loudness)
+        waveform = torch.tanh(waveform) 
+        loudness = mod_sigmoid(loudness)
+
+        if return_parts:
+            return waveform, loudness, noise
+
+        waveform = waveform * loudness
 
         if add_noise:
             waveform = waveform + noise
@@ -1133,14 +1143,27 @@ class RAVE(pl.LightningModule):
         return z
 
     def decode(self, z):
+        z = self.pad_latent(z)
         if self.gimbal is not None:
             z = self.gimbal.inv(z)
-        z = self.pad_latent(z)
 
         y = self.decoder(z, add_noise=self.hparams['use_noise'])
         if self.pqmf is not None:
             y = self.pqmf.inverse(y)
         return y
+
+    def decode_parts(self, z, pqmf=True):
+        z = self.pad_latent(z)
+        if self.gimbal is not None:
+            z = self.gimbal.inv(z)
+
+        wav, loud, noise = self.decoder(
+            z, add_noise=self.hparams['use_noise'], return_parts=True)
+        if pqmf and self.pqmf is not None:
+            wav = self.pqmf.inverse(wav)
+            loud = self.pqmf.inverse(loud)
+            noise = self.pqmf.inverse(noise)
+        return wav, loud, noise
 
     def validation_step(self, batch, batch_idx, loader_idx):
             

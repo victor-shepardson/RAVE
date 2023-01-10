@@ -30,6 +30,8 @@ class args(Config):
     # if True, the latent is sampled at zero temperature
     # and the noise branch of the decoder is turned off (!)
     DETERMINISTIC = False
+    # 
+    USE_PCA = True
 
 
 args.parse_args()
@@ -45,7 +47,7 @@ import math
 
 class TraceModel(nn.Module):
     def __init__(self, pretrained: RAVE, resample: Resampling,
-                 fidelity: float):
+                 fidelity: float, use_pca: bool):
         super().__init__()
 
         latent_size = pretrained.latent_size
@@ -54,6 +56,8 @@ class TraceModel(nn.Module):
         self.pqmf = pretrained.pqmf
         self.encoder = pretrained.encoder
         self.decoder = pretrained.decoder
+
+        self.register_buffer("kld_idxs", pretrained.kld_idxs)
 
         self.register_buffer("latent_pca", pretrained.latent_pca)
         self.register_buffer("latent_mean", pretrained.latent_mean)
@@ -73,12 +77,23 @@ class TraceModel(nn.Module):
         self.trained_cropped = bool(pretrained.cropped_latent_size)
         self.deterministic = args.DETERMINISTIC
 
+        self.use_pca = use_pca
         if self.trained_cropped:
             self.cropped_latent_size = pretrained.cropped_latent_size
         else:
-            latent_size = np.argmax(pretrained.fidelity.numpy() > fidelity)
-            latent_size = 2**math.ceil(math.log2(latent_size))
-            self.cropped_latent_size = latent_size
+            if int(fidelity)==fidelity and fidelity > 1:
+                self.cropped_latent_size = int(fidelity)
+            else:
+                if use_pca:
+                    latent_size = np.argmax(pretrained.fidelity.numpy() > fidelity)
+                    latent_size = 2**math.ceil(math.log2(latent_size))
+                    self.cropped_latent_size = latent_size
+                else:
+                    kld_fid = (pretrained.kld_values / pretrained.kld_values.sum()).cumsum(0)
+                    latent_size = np.argmax(kld_fid.numpy() > fidelity)
+                    print(pretrained.kld_values, latent_size)
+                    latent_size = 2**math.ceil(math.log2(latent_size))
+                    self.cropped_latent_size = latent_size
 
         x = torch.zeros(1, 1, 2**14)
         z = self.encode(x)
@@ -108,11 +123,12 @@ class TraceModel(nn.Module):
         self.stereo = args.STEREO
 
     def post_process_distribution(self, mean, scale):
-        std = nn.functional.softplus(scale) + 1e-4
+        # std = nn.functional.softplus(scale) + 1e-4
+        std = scale.exp()
         return mean, std
 
     def reparametrize(self, mean, std):
-        var = std * std
+        # var = std * std
         # logvar = torch.log(var)
 
         z = torch.randn_like(mean) * std + mean
@@ -135,33 +151,36 @@ class TraceModel(nn.Module):
         else:
             z = self.reparametrize(mean, std)#[0]
 
-        z = z - self.latent_mean.unsqueeze(-1)
-        z = nn.functional.conv1d(z, self.latent_pca.unsqueeze(-1))
+        if self.use_pca:
+            z = z - self.latent_mean.unsqueeze(-1)
+            z = nn.functional.conv1d(z, self.latent_pca.unsqueeze(-1))
+            z = z[:, :self.cropped_latent_size]
+        else:
+            z = z[:, self.kld_idxs[:self.cropped_latent_size]]
 
-        z = z[:, :self.cropped_latent_size]
         return z
 
-    @torch.jit.export
-    def encode_amortized(self, x):
-        x = self.resample.from_target_sampling_rate(x)
+    # @torch.jit.export
+    # def encode_amortized(self, x):
+    #     x = self.resample.from_target_sampling_rate(x)
 
-        if self.pqmf is not None:
-            x = self.pqmf(x)
+    #     if self.pqmf is not None:
+    #         x = self.pqmf(x)
 
-        mean, scale = self.encoder(x).chunk(2,1)
-        mean, std = self.post_process_distribution(mean, scale)
-        var = std * std
+    #     mean, scale = self.encoder(x).chunk(2,1)
+    #     mean, std = self.post_process_distribution(mean, scale)
+    #     var = std * std
 
-        mean = mean - self.latent_mean.unsqueeze(-1)
+    #     mean = mean - self.latent_mean.unsqueeze(-1)
 
-        mean = nn.functional.conv1d(mean, self.latent_pca.unsqueeze(-1))
-        var = nn.functional.conv1d(var, self.latent_pca.unsqueeze(-1).pow(2))
+    #     mean = nn.functional.conv1d(mean, self.latent_pca.unsqueeze(-1))
+    #     var = nn.functional.conv1d(var, self.latent_pca.unsqueeze(-1).pow(2))
 
-        mean = mean[:, :self.cropped_latent_size]
-        var = var[:, :self.cropped_latent_size]
-        std = var.sqrt()
+    #     mean = mean[:, :self.cropped_latent_size]
+    #     var = var[:, :self.cropped_latent_size]
+    #     std = var.sqrt()
 
-        return mean, std
+    #     return mean, std
 
     @torch.jit.export
     def decode(self, z):
@@ -192,9 +211,12 @@ class TraceModel(nn.Module):
 
         z = torch.cat([z, pad_latent], 1)
 
-        if not self.trained_cropped:  # PERFORM PCA AFTER PADDING
-            z = nn.functional.conv1d(z, self.latent_pca.T.unsqueeze(-1))
-            z = z + self.latent_mean.unsqueeze(-1)
+        if self.use_pca:
+            if not self.trained_cropped:  # PERFORM PCA AFTER PADDING
+                z = nn.functional.conv1d(z, self.latent_pca.T.unsqueeze(-1))
+                z = z + self.latent_mean.unsqueeze(-1)
+        else:
+            z = z[:, self.kld_idxs.argsort()]
 
         x = self.decoder(z, add_noise=not self.deterministic)
 
@@ -252,7 +274,7 @@ x = torch.zeros(1, 1, 2**14)
 resample.to_target_sampling_rate(resample.from_target_sampling_rate(x))
 
 logging.info("script model")
-model = TraceModel(model, resample, args.FIDELITY)
+model = TraceModel(model, resample, args.FIDELITY, args.USE_PCA)
 model(x)
 
 model = torch.jit.script(model)

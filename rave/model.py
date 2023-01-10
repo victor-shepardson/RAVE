@@ -851,6 +851,11 @@ class RAVE(pl.LightningModule):
             z = torch.cat([z, noise], 1)    
         return z
 
+    def shift_latent(self, z):
+        # left pad and slice off end before sending to prior
+        # to align prior with posterior
+        return torch.cat((z.new_zeros((*z.shape[:2], 1)), z[...,:-1]), -1)
+
     def training_step(self, batch, batch_idx):
         p = Profiler()
         self.saved_step += 1
@@ -873,11 +878,25 @@ class RAVE(pl.LightningModule):
 
         def encode():
             q_params = self.split_params(self.encoder(x, double=double_z))
+            if self.gimbal is not None:
+                q_params = self.gimbal(*q_params)
             z = self.reparametrize(*q_params)
-            shift_z = torch.cat((z.new_zeros((*z.shape[:2], 1)), z[...,:-1]), -1)
+            shift_z = self.shift_latent(z)
             p_params = self.split_params(self.prior(shift_z))
+            #####legacy (for run 016)
+            if self.gimbal is not None:
+                p_params = self.gimbal(*p_params)
+            #####
             kl = self.kld(z, *q_params, *p_params)
             kl_prior = self.kld(self.reparametrize(*p_params), *p_params)
+
+            kl = kl.sum() if kl is not None else 0
+            kl_prior = kl_prior.sum() if kl_prior is not None else 0
+
+            if self.gimbal is not None:
+                z = self.gimbal.inv(z)
+            z = self.pad_latent(z)
+
             return z, kl, kl_prior
 
         # ENCODE INPUT
@@ -888,12 +907,6 @@ class RAVE(pl.LightningModule):
                     z, kl, kl_prior = encode()
             else:
                 z, kl, kl_prior = encode()
-        kl = kl.sum() if kl is not None else 0
-        kl_prior = kl_prior.sum() if kl_prior is not None else 0
-
-        if self.gimbal is not None:
-            z = self.gimbal.inv(z)
-        z = self.pad_latent(z)
 
         # DECODE LATENT
         with autocast(enabled=self.hparams['amp']):
@@ -1104,8 +1117,6 @@ class RAVE(pl.LightningModule):
         if self.cropped_latent_size > 0:
             return p, None
         params = p.chunk(2,1)
-        if self.gimbal is not None:
-            return self.gimbal(*params)
         return params
 
     def encode(self, x):
@@ -1113,8 +1124,12 @@ class RAVE(pl.LightningModule):
             x = self.pqmf(x)
 
         params = self.encoder(x)
+        params = self.split_params(params)
 
-        z = self.reparametrize(*self.split_params(params))
+        if self.gimbal is not None:
+            params = self.gimbal(*params)
+
+        z = self.reparametrize(*params)
         return z
 
     def decode(self, z):
@@ -1137,10 +1152,12 @@ class RAVE(pl.LightningModule):
             target = self.pqmf(target)
 
         q_mean, q_scale = self.split_params(self.encoder(x))
+        if self.gimbal is not None:
+            q_mean, q_scale = self.gimbal(q_mean, q_scale)
 
         if loader_idx > 0:
-            # z = mean
-            z = q_mean
+            z = self.reparametrize(q_mean, q_scale)
+            # z = q_mean
             to_decode = torch.cat((
                 z, 
                 z + torch.randn((*q_mean.shape[:2], 1), device=q_mean.device)/2),
@@ -1148,7 +1165,11 @@ class RAVE(pl.LightningModule):
         else:
             z = to_decode = self.reparametrize(q_mean, q_scale)
 
-        p_mean, p_scale = self.split_params(self.prior(z)[...,:-1])
+        p_mean, p_scale = self.split_params(self.prior(self.shift_latent(z)))
+        ####legacy (for run 016)
+        if self.gimbal is not None:
+            p_mean, p_scale = self.gimbal(p_mean, p_scale)
+        #####
         kl = self.kld(z, q_mean, q_scale, p_mean, p_scale)
 
         if self.gimbal is not None:

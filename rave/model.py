@@ -243,7 +243,8 @@ class Generator(nn.Module):
                  noise_bands,
                  padding_mode,
                  bias=False,
-                 script=True
+                 script=True,
+                 block_depth=2
             ):
         super().__init__()
 
@@ -281,6 +282,7 @@ class Generator(nn.Module):
                     out_dim,
                     3,
                     padding_mode,
+                    depth=block_depth,
                     cumulative_delay=net[-1].cumulative_delay,
                     boom=boom,
                     group_size=group_size,
@@ -893,10 +895,7 @@ class RAVE(pl.LightningModule):
             z = self.reparametrize(*q_params)
             shift_z = self.shift_latent(z)
             p_params = self.split_params(self.prior(shift_z))
-            #####legacy (for run 016)
-            if self.gimbal is not None:
-                p_params = self.gimbal(*p_params)
-            #####
+
             kl = self.kld(z, *q_params, *p_params)
             kl_prior = self.kld(self.reparametrize(*p_params), *p_params)
 
@@ -1189,10 +1188,7 @@ class RAVE(pl.LightningModule):
             z = to_decode = self.reparametrize(q_mean, q_scale)
 
         p_mean, p_scale = self.split_params(self.prior(self.shift_latent(z)))
-        ####legacy (for run 016)
-        if self.gimbal is not None:
-            p_mean, p_scale = self.gimbal(p_mean, p_scale)
-        #####
+
         kl = self.kld(z, q_mean, q_scale, p_mean, p_scale)
 
         if self.gimbal is not None:

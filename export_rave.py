@@ -56,6 +56,8 @@ class TraceModel(nn.Module):
         self.pqmf = pretrained.pqmf
         self.encoder = pretrained.encoder
         self.decoder = pretrained.decoder
+        self.gimbal = pretrained.gimbal
+        self.prior = pretrained.prior
 
         self.register_buffer("kld_idxs", pretrained.kld_idxs)
 
@@ -99,6 +101,9 @@ class TraceModel(nn.Module):
         z = self.encode(x)
         ratio = x.shape[-1] // z.shape[-1]
 
+        self.register_buffer("last_z",
+            torch.zeros(cc.MAX_BATCH_SIZE, self.latent_size, 1))
+
         self.register_buffer(
             "encode_params",
             torch.tensor([
@@ -116,6 +121,7 @@ class TraceModel(nn.Module):
                 2 if args.STEREO else 1,
                 1,
             ]))
+
 
         self.register_buffer("forward_params",
                              torch.tensor([1, 1, 2 if args.STEREO else 1, 1]))
@@ -144,6 +150,8 @@ class TraceModel(nn.Module):
             x = self.pqmf(x)
 
         mean, scale = self.encoder(x).chunk(2,1)
+        if self.gimbal is not None:
+            mean, scale = self.gimbal(mean, scale)        
         mean, std = self.post_process_distribution(mean, scale)
 
         if self.deterministic:
@@ -192,24 +200,36 @@ class TraceModel(nn.Module):
             z = z.expand(2, z.shape[1], z.shape[2])
 
         # CAT WITH SAMPLES FROM PRIOR DISTRIBUTION
-        pad_size = self.latent_size.item() - z.shape[1]
+        # pad_size = self.latent_size.item() - z.shape[1]
+
+        last_z = self.last_z[:z.shape[0]]
+        prior_mean, prior_scale = self.prior(last_z).chunk(2,1)
+        prior_mean, prior_scale  = self.post_process_distribution(
+            prior_mean, prior_scale)
 
         if self.deterministic:
-            pad_latent = torch.zeros(
-                z.shape[0],
-                pad_size,
-                z.shape[-1],
-                device=z.device,
-            )
+            pad_latent = prior_mean
+            # pad_latent = torch.zeros(
+            #     z.shape[0],
+            #     pad_size,
+            #     z.shape[-1],
+            #     device=z.device,
+            # )
         else:
-            pad_latent = torch.randn(
-                z.shape[0],
-                pad_size,
-                z.shape[-1],
-                device=z.device,
-            )
+            pad_latent = self.reparametrize(prior_mean, prior_scale)
+            # pad_latent = torch.randn(
+            #     z.shape[0],
+            #     pad_size,
+            #     z.shape[-1],
+            #     device=z.device,
+            # )
+        pad_latent = pad_latent[:, self.cropped_latent_size:]
+
+        # print(last_z.shape, z.shape, pad_latent.shape)
 
         z = torch.cat([z, pad_latent], 1)
+
+        self.last_z[:z.shape[0]] = z
 
         if self.use_pca:
             if not self.trained_cropped:  # PERFORM PCA AFTER PADDING
@@ -218,7 +238,10 @@ class TraceModel(nn.Module):
         else:
             z = z[:, self.kld_idxs.argsort()]
 
-        x = self.decoder(z, add_noise=not self.deterministic)
+        if self.gimbal is not None:
+            z = self.gimbal.inv(z)  
+
+        x = self.decoder.mix(*self.decoder(z), add_noise=not self.deterministic)
 
         if self.pqmf is not None:
             x = self.pqmf.inverse(x)
@@ -245,7 +268,7 @@ for m in model.modules():
         remove_weight_norm(m)
 
 logging.info("warmup forward pass")
-x = torch.zeros(1, 1, 2**14)
+x = torch.zeros(1, 1, model.block_size())
 if model.pqmf is not None:
     x = model.pqmf(x)
 
@@ -254,7 +277,7 @@ z = model.reparametrize(*model.split_params(model.encoder(x)))
 if args.STEREO:
     z = z.expand(2, *z.shape[1:])
 
-y = model.decoder(z)
+y = model.decoder.mix(*model.decoder(z))
 
 if model.pqmf is not None:
     y = model.pqmf.inverse(y)
@@ -270,7 +293,7 @@ else:
 
 logging.info("build resampling model")
 resample = Resampling(target_sr, sr)
-x = torch.zeros(1, 1, 2**14)
+x = torch.zeros(1, 1, model.block_size())
 resample.to_target_sampling_rate(resample.from_target_sampling_rate(x))
 
 logging.info("script model")

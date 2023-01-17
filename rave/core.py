@@ -9,6 +9,33 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 import librosa as li
 from pathlib import Path
 
+def gauss_window(pts, scale, device='cpu'):
+    x = torch.linspace(-scale, scale, pts, device=device)
+    return (-x*x).exp()
+
+def angle_wrap(x):
+    pi = np.pi
+    return (x + pi)%(2*pi) - pi
+
+def get_phase_dev(audio, nfft=4096, overlap=32, win_param=6):
+    hop = nfft//overlap
+    win_size = nfft
+    h = gauss_window(win_size, win_param, device=audio.device)
+    S = torch.stft(
+        audio, nfft, hop_length=hop, win_length=win_size, window=h, return_complex=True)
+
+    bin_centers = torch.linspace(0, np.pi, nfft//2+1, device=audio.device)
+
+    phase = S.angle()
+    delta_phase = phase.diff(1, -1)
+
+    bin_center_dev = bin_centers[:,None]*hop
+    phase_dev = delta_phase - bin_center_dev
+
+    # pseudo_group_delay = phase.diff(1,0)%(2*np.pi)
+
+    return angle_wrap(phase_dev)
+
 
 def mod_sigmoid(x):
     return 2 * torch.sigmoid(x)**2.3 + 1e-7

@@ -18,7 +18,7 @@ import cached_conv as cc
 from .weight_norm import weight_norm as wn
 from .weight_norm import remove_weight_norm
 from .core import multiscale_stft, Loudness, mod_sigmoid
-from .core import amp_to_impulse_response, fft_convolve, get_beta_kl_cyclic_annealed, get_beta_kl, get_phase_dev
+from .core import amp_to_impulse_response, fft_convolve, get_beta_kl_cyclic_annealed, get_beta_kl, get_inst_freq_patches
 from .pqmf import CachedPQMF as PQMF
 
 class Profiler:
@@ -766,18 +766,32 @@ class RAVE(pl.LightningModule):
     def log_distance(self, x, y):
         return abs(torch.log(x + 1e-7) - torch.log(y + 1e-7)).mean()
 
-
-    def phase_distance(self, x, y, y2=None, emd=False):
+    def phase_distance(self, x, y, y2=None, emd=False, weight=True, norm_ord=1):
         if y2 is not None:
             raise NotImplementedError("implement phase_distance+GED")
         assert x.shape[1]==1
         assert y.shape[1]==1
-        x, y = get_phase_dev(torch.cat((x[:,0], y[:,0]))).chunk(2)
-        d = x - y
-        if emd:
-            d = d.cumsum(1)
-        return (x-y).abs().mean()
+        phase, mag = get_inst_freq_patches(torch.cat((x[:,0], y[:,0])))
+        x, y = phase.chunk(2)
+        m, _ = mag.chunk(2)
+        d = (x - y).abs().mean(-1) # mean over patch
+        scale = 1e3
 
+        # print(m.shape, d.shape)
+
+        norm = lambda s: torch.linalg.vector_norm(s, 
+            ord=norm_ord, dim=tuple(range(1, s.ndim)))
+        
+        if weight:
+            m = m.sqrt() # patch weight
+            scale = scale / (1e-3+norm(m)) # norm by total spectrogram weight
+            d = d * m
+   
+        # if emd:
+        #     assert norm_ord==1
+        #     d = d.cumsum(1) 
+
+        return (norm(d) * scale).mean()
 
     def distance(self, x, y, y2=None):
         """
@@ -1211,7 +1225,8 @@ class RAVE(pl.LightningModule):
             to_decode = self.gimbal.inv(to_decode)
         to_decode = self.pad_latent(to_decode)
 
-        y = self.decoder.mix(*self.decoder(to_decode), add_noise=self.hparams['use_noise'])
+        y = self.decoder.mix(*self.decoder(to_decode), 
+            add_noise=self.hparams['use_noise'])
         # print(x.shape, z.shape, y.shape)
 
         if self.pqmf is not None:
@@ -1225,6 +1240,8 @@ class RAVE(pl.LightningModule):
         distance = self.distance(target, y)
         baseline_distance = self.distance(target, x)
 
+        phase_distance = self.phase_distance(target, y)
+
         if self.trainer is not None:
             # if loader_idx==0:
             # full-band distance only,
@@ -1232,9 +1249,9 @@ class RAVE(pl.LightningModule):
             # KLD in bits per second
             self.log("valid_distance", distance)
             self.log("valid_distance/baseline", baseline_distance)
+            self.log("valid_phase_distance", phase_distance)
             if kl is not None:
                 self.log("valid_kld_bps", self.npz_to_bps(kl.sum()))
-        
 
         if loader_idx==0:
             return torch.cat([y, target], -1), q_mean, kl

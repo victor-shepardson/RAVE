@@ -17,24 +17,70 @@ def angle_wrap(x):
     pi = np.pi
     return (x + pi)%(2*pi) - pi
 
-def get_phase_dev(audio, nfft=4096, overlap=32, win_param=6):
+# def get_inst_freq(audio, nfft=4096, overlap=31, win_param=6, k=3, s=2):
+#     hop = nfft//overlap
+#     win_size = nfft
+#     h = gauss_window(win_size, win_param, device=audio.device)
+#     Dh = gauss_window(win_size+1, win_param, device=audio.device).diff()
+#     S = torch.stft(
+#         audio, nfft, hop_length=hop, win_length=win_size, window=h, return_complex=True, center=False
+#         )
+#     dS = torch.stft(
+#         audio, nfft, hop_length=hop, win_length=win_size, window=Dh, return_complex=True, center=False
+#         )
+
+#     # avoid nans
+#     cond = S.abs()>1e-7
+#     S_masked = S.where(cond, S.new_ones(1))
+
+#     bin_centers = torch.linspace(0, np.pi, nfft//2+1, device=audio.device)
+#     phase_dev = (dS/S_masked).imag 
+#     freq = phase_dev + bin_centers[:,None]
+
+#     # reduce
+#     freq = freq.unfold(1, k, s).unfold(2, k, s)
+#     med = freq.reshape(*freq.shape[:-2], -1).median(-1)
+#     freq = med.values
+    
+#     # could do math on the indices instead of unfolding here
+#     mag = S.unfold(1, k, s).unfold(2, k, s)
+#     mag = mag.reshape(*mag.shape[:-2], -1)
+#     mag = mag.gather(-1, med.indices[...,None])[...,0].abs()
+    
+#     # return angle_wrap(torch.nan_to_num(phase_dev, posinf=0, neginf=0)), S.abs()
+#     # return torch.nan_to_num(phase_dev, posinf=0, neginf=0), S.abs()
+#     return torch.nan_to_num(freq, posinf=0, neginf=0), mag
+
+def get_inst_freq_patches(audio, 
+        nfft=4096, overlap=31, win_param=6, k=5, s=4, drop=2):
     hop = nfft//overlap
     win_size = nfft
     h = gauss_window(win_size, win_param, device=audio.device)
+    Dh = gauss_window(win_size+1, win_param, device=audio.device).diff()
     S = torch.stft(
-        audio, nfft, hop_length=hop, win_length=win_size, window=h, return_complex=True)
+        audio, nfft, hop_length=hop, win_length=win_size, window=h, return_complex=True, center=False)
+    dS = torch.stft(
+        audio, nfft, hop_length=hop, win_length=win_size, window=Dh, return_complex=True, center=False)
+
+    # avoid nans
+    cond = S.abs()>1e-7
+    S_masked = S.where(cond, S.new_ones(1))
 
     bin_centers = torch.linspace(0, np.pi, nfft//2+1, device=audio.device)
+    phase_dev = (dS/S_masked).imag 
+    freq = phase_dev + bin_centers[:,None]
 
-    phase = S.angle()
-    delta_phase = phase.diff(1, -1)
+    # get sorted patches
+    patches = freq.unfold(1, k, s).unfold(2, k, s)
+    patches = patches.reshape(*patches.shape[:-2], -1)
+    patches = patches.sort(-1).values[...,drop:-drop] # drop extrema
+    
+    mag = nn.functional.avg_pool2d(S.abs(), k, s)
+    # mag = S.unfold(1, k, s).unfold(2, k, s)
+    # mag = mag.reshape(*mag.shape[:-2], -1).mean(-1)
+    
+    return torch.nan_to_num(patches, posinf=0, neginf=0), mag
 
-    bin_center_dev = bin_centers[:,None]*hop
-    phase_dev = delta_phase - bin_center_dev
-
-    # pseudo_group_delay = phase.diff(1,0)%(2*np.pi)
-
-    return angle_wrap(phase_dev)
 
 
 def mod_sigmoid(x):
@@ -64,7 +110,7 @@ def multiscale_stft(signal, scales, overlap):
             int(s * (1 - overlap)),
             s,
             torch.hann_window(s, device=signal.device, dtype=signal.dtype),
-            True,
+            center=True,
             normalized=True,
             return_complex=True,
         ).abs()

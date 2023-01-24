@@ -53,11 +53,12 @@ if __name__ == "__main__":
         RATIOS = [2,2,2,2,2,2,2]
         # reduction in data dim in encoder / increase (reversed) in generator
         NARROW = [1,1,1,1,2,2,2]
-        #low and high values for the cyclic beta-VAE objective
-        MIN_KL = 1e-6
-        MAX_KL = 1e-1
+        #low and high values for the ramping beta-VAE objective
+        MIN_BETA = 1e-6
+        MAX_BETA = 1e-1
         # weight KLD between causal prior and unit normal hyperprior
-        BETA_PRIOR = 1e-4
+        MIN_BETA_PRIOR = 1e-3
+        MAX_BETA_PRIOR = 1e-1
         # decouple latent location+scale from encoder, decoder architectures
         GIMBAL = False
         # if this is nonzero, crop the latent space before training
@@ -115,7 +116,7 @@ if __name__ == "__main__":
 
         # this only affects KL annealing schedule now
         WARMUP = 300_000
-        # steps to cycle the KLD if MIN_KL and MAX_KL differ
+        # steps to cycle the KLD if MIN_BETA and MAX_BETA differ
         # KL_CYCLE = 50000
         
         # checkpoint to resume training from
@@ -239,9 +240,10 @@ if __name__ == "__main__":
             gimbal=args.GIMBAL,
             no_latency=args.NO_LATENCY,
             sr=args.SR,
-            min_kl=args.MIN_KL,
-            max_kl=args.MAX_KL,
-            beta_prior=args.BETA_PRIOR,
+            min_beta=args.MIN_BETA,
+            max_beta=args.MAX_BETA,
+            min_beta_prior=args.MIN_BETA_PRIOR,
+            max_beta_prior=args.MAX_BETA_PRIOR,
             cropped_latent_size=args.CROPPED_LATENT_SIZE,
             feature_match=args.FEATURE_MATCH,
             gen_lr=args.GEN_LR,

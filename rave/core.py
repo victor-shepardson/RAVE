@@ -52,7 +52,7 @@ def angle_wrap(x):
 #     return torch.nan_to_num(freq, posinf=0, neginf=0), mag
 
 def get_inst_freq_patches(audio, 
-        nfft=4096, overlap=31, win_param=6, k=5, s=4, drop=2):
+        nfft=2048, overlap=17, win_param=5, k=5, s=4, drop=2):
     hop = nfft//overlap
     win_size = nfft
     h = gauss_window(win_size, win_param, device=audio.device)
@@ -67,8 +67,8 @@ def get_inst_freq_patches(audio,
     S_masked = S.where(cond, S.new_ones(1))
 
     bin_centers = torch.linspace(0, np.pi, nfft//2+1, device=audio.device)
-    phase_dev = (dS/S_masked).imag 
-    freq = phase_dev + bin_centers[:,None]
+    freq_dev = (dS/S_masked).imag 
+    freq = freq_dev + bin_centers[:,None]
 
     # get sorted patches
     patches = freq.unfold(1, k, s).unfold(2, k, s)

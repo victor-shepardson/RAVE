@@ -33,7 +33,7 @@ class args(Config):
     # should be true for realtime
     CACHED = True
     # number of latents to preserve from RAVE model
-    LATENT_SIZE = None
+    LATENT_SIZE = 0
     # maximum predictive context size
     CONTEXT = 24
     # maximum number of frames to fit model on
@@ -252,7 +252,8 @@ class LivingLooper(nn.Module):
             n_memory:int, # maximum loop memory 
             n_fit:int, # maximum dataset size to fit
             latency_correct:int, # in latent frames
-            sr:int # sample rate
+            sr:int, # sample rate
+            latent_size:int # number of latent dims to use
             ):
         super().__init__()
 
@@ -264,8 +265,8 @@ class LivingLooper(nn.Module):
         self.min_loop = 2
         self.latency_correct = latency_correct
 
-        # support standard exported RAVE models
         if isinstance(rave_model, torch.jit.ScriptModule):
+            # support standard exported RAVE models:
             # unwrap neutone
             if hasattr(rave_model, 'model'):
                 rave_model = rave_model.model
@@ -276,6 +277,7 @@ class LivingLooper(nn.Module):
             self.sampling_rate = rave_model.sampling_rate.item()
             self.rave = rave_model
         else:
+            # raw RAVE checkpoints from this fork:
             self.block_size = rave_model.block_size()
             self.sampling_rate = rave_model.hparams['sr']
             self.rave = None
@@ -284,16 +286,34 @@ class LivingLooper(nn.Module):
             cropped_latent_size = rave_model.cropped_latent_size
         except AttributeError:
             cropped_latent_size = 0
+        assert latent_size==0 or cropped_latent_size==0, """
+            pre-cropped RAVE models don't support dynamic cropping
+            """
 
         print(f'{self.block_size=}, {self.sampling_rate=}')
 
         assert sr==0 or sr==self.sampling_rate
 
-        self.trained_cropped = bool(cropped_latent_size)
-        self.n_latent = (
-            rave_model.cropped_latent_size 
-            if self.trained_cropped 
-            else rave_model.latent_size)
+        # self.trained_cropped = bool(cropped_latent_size)
+        self.n_latent = cropped_latent_size or latent_size or rave_model.latent_size
+        print(f'{self.n_latent=}')
+
+        if self.rave is None:
+            # dynamically crop rave latents based on posterior KLD
+            idxs = rave_model.kld_idxs
+            self.register_buffer('encode_idxs', idxs[:self.n_latent])
+            self.register_buffer('prior_idxs', idxs[self.n_latent:])
+            self.register_buffer('decode_idxs', idxs.argsort())
+        else:
+            idxs = torch.arange(latent_size, dtype=torch.long)
+            self.register_buffer('encode_idxs', idxs)
+            self.register_buffer('prior_idxs', idxs[:0])
+            self.register_buffer('decode_idxs', idxs)
+
+        # self.n_latent = (
+            # rave_model.cropped_latent_size 
+            # if self.trained_cropped 
+            # else (latent_size or rave_model.latent_size))
 
         self.loops = nn.ModuleList(Loop(
             i, n_loops, n_context, n_memory, n_fit, self.n_latent
@@ -303,6 +323,8 @@ class LivingLooper(nn.Module):
         self.encoder = rave_model.encoder
         self.decoder = rave_model.decoder
         self.n_latent_decoder = rave_model.latent_size
+        self.gimbal = rave_model.gimbal
+        self.prior = rave_model.prior
 
         # continuously updated last N frames of memory
         self.register_buffer('memory', 
@@ -310,6 +332,10 @@ class LivingLooper(nn.Module):
 
         self.register_buffer('mask', 
             torch.empty(2, n_loops, requires_grad=False))
+
+        # history for prior
+        self.register_buffer("last_z",
+            torch.zeros(n_loops, self.n_latent_decoder, 1))
 
         self.reset()
 
@@ -325,6 +351,7 @@ class LivingLooper(nn.Module):
 
         self.memory.zero_()
         self.mask.zero_()
+        self.last_z.zero_()
 
     def forward(self, i:int, x, oneshot:int=0):
         """
@@ -491,31 +518,58 @@ class LivingLooper(nn.Module):
         """
         RAVE encoder
         """
+        # case of a pre-exported RAVE model
         if self.rave is not None:
             return self.rave.encode(x)
 
         if self.pqmf is not None:
             x = self.pqmf(x)
 
-        z = self.encoder(x)[:,:self.n_latent]
+        # z = self.encoder(x)[:,:self.n_latent]
+
+        mean, scale = self.encoder(x).chunk(2,1)
+        if self.gimbal is not None:
+            mean, scale = self.gimbal(mean, scale)    
+        # reorder+crop    
+        mean = mean[:, self.encode_idxs]
+        scale = scale[:, self.encode_idxs]
+        std = scale.exp()
+        z = torch.randn_like(mean) * std + mean
+
         return z
 
     def decode(self, z):
         """
         RAVE decoder
         """
+        # case of a pre-exported RAVE model
         if self.rave is not None:
             return self.rave.decode(z)
 
         pad_size = self.n_latent_decoder - self.n_latent
-        pad_latent = torch.randn(
-            z.shape[0],
-            pad_size,
-            z.shape[-1],
-            device=z.device,
-        )
+
+        if self.prior is not None:
+            last_z = self.last_z[:z.shape[0]]
+            prior_mean, prior_scale = self.prior(last_z).chunk(2,1)
+            prior_std = prior_scale.exp()
+            prior_z = torch.randn_like(prior_mean) * prior_std + prior_mean
+            # reorder+crop
+            pad_latent = prior_z[:, self.prior_idxs]
+        else:
+            pad_latent = torch.randn(
+                z.shape[0],
+                pad_size,
+                z.shape[-1],
+                device=z.device,
+            )
 
         z = torch.cat([z, pad_latent], 1)
+
+        # reorder
+        z = z[:, self.decode_idxs]
+
+        if self.gimbal is not None:
+            z = self.gimbal.inv(z) 
 
         x = self.decoder(z)
 
@@ -532,7 +586,7 @@ if args.CKPT is not None:
     logging.info(f"using {ckpt}")
 
     # debug_kw = {}
-    debug_kw = {'script':False, 'use_norm_dist':False}#, 'cropped_latent_size':36, 'latent_size':128} ###DEBUG
+    debug_kw = {'script':False}#, 'cropped_latent_size':36, 'latent_size':128} ###DEBUG
     # debug_kw = {'cropped_latent_size':8, 'latent_size':128} ###DEBUG
 
     model = RAVE.load_from_checkpoint(ckpt, **debug_kw, strict=False).eval()
@@ -542,8 +596,8 @@ if args.CKPT is not None:
         if hasattr(m, "weight_g"):
             remove_weight_norm(m)
 
-    if args.LATENT_SIZE is not None:
-        model.crop_latent_space(int(args.LATENT_SIZE))
+    # if args.LATENT_SIZE is not None:
+        # model.crop_latent_space(int(args.LATENT_SIZE))
 
 elif args.TS is not None:
     logging.info("loading RAVE model from torchscript")
@@ -562,7 +616,8 @@ looper = LivingLooper(model,
     args.LOOPS, args.CONTEXT, 
     args.MEMORY, args.FIT,
     args.LATENCY_CORRECT,
-    args.SR)
+    args.SR,
+    args.LATENT_SIZE)
 looper.eval()
 
 # smoke test

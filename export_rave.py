@@ -241,7 +241,7 @@ class TraceModel(nn.Module):
         if self.gimbal is not None:
             z = self.gimbal.inv(z)  
 
-        x = self.decoder.mix(*self.decoder(z), add_noise=not self.deterministic)
+        x = self.decoder(z, add_noise=not self.deterministic)
 
         if self.pqmf is not None:
             x = self.pqmf.inverse(x)
@@ -277,7 +277,7 @@ z = model.reparametrize(*model.split_params(model.encoder(x)))
 if args.STEREO:
     z = z.expand(2, *z.shape[1:])
 
-y = model.decoder.mix(*model.decoder(z))
+y = model.decoder(z)
 
 if model.pqmf is not None:
     y = model.pqmf.inverse(y)

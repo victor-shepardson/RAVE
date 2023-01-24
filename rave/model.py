@@ -339,8 +339,9 @@ class Generator(nn.Module):
 
         self.loud_stride = loud_stride
         self.cumulative_delay = self.synth.cumulative_delay
+        
 
-    def forward(self, x, return_parts: bool = False):
+    def parts(self, x):
         x = self.net(x)
 
         if self.has_noise_branch:
@@ -357,7 +358,9 @@ class Generator(nn.Module):
 
         return waveform, loudness, noise
 
-    def mix(self, waveform, loudness, noise, add_noise: bool = True):
+    def forward(self, x, add_noise: bool = True):
+        waveform, loudness, noise = self.parts(x)
+
         waveform = waveform * loudness
 
         if add_noise:
@@ -603,12 +606,13 @@ class RAVE(pl.LightningModule):
                  group_size=64,
                  encoder_norm=None,
                  no_latency=False,
-                 min_kl=1e-4,
-                 max_kl=5e-1,
-                 beta_prior=1e-4,
+                 min_beta=1e-6,
+                 max_beta=1e-1,
+                 min_beta_prior=1e-3,
+                 max_beta_prior=1e-1,
                  cropped_latent_size=0,
                  feature_match=True,
-                 sr=24000,
+                 sr=48000,
                  gen_lr=1e-4,
                  dis_lr=1e-4,
                  gen_adam_betas=(0.5,0.9),
@@ -706,8 +710,6 @@ class RAVE(pl.LightningModule):
         self.sr = sr
         self.mode = mode
 
-        self.min_kl = min_kl
-        self.max_kl = max_kl
         self.cropped_latent_size = cropped_latent_size
 
         self.feature_match = feature_match
@@ -766,7 +768,7 @@ class RAVE(pl.LightningModule):
     def log_distance(self, x, y):
         return abs(torch.log(x + 1e-7) - torch.log(y + 1e-7)).mean()
 
-    def phase_distance(self, x, y, y2=None, emd=False, weight=True, norm_ord=1):
+    def phase_distance(self, x, y, y2=None,  weight=True, norm_ord=1):
         if y2 is not None:
             raise NotImplementedError("implement phase_distance+GED")
         assert x.shape[1]==1
@@ -777,8 +779,6 @@ class RAVE(pl.LightningModule):
         d = (x - y).abs().mean(-1) # mean over patch
         scale = 1e3
 
-        # print(m.shape, d.shape)
-
         norm = lambda s: torch.linalg.vector_norm(s, 
             ord=norm_ord, dim=tuple(range(1, s.ndim)))
         
@@ -786,10 +786,6 @@ class RAVE(pl.LightningModule):
             m = m.sqrt() # patch weight
             scale = scale / (1e-3+norm(m)) # norm by total spectrogram weight
             d = d * m
-   
-        # if emd:
-        #     assert norm_ord==1
-        #     d = d.cumsum(1) 
 
         return (norm(d) * scale).mean()
 
@@ -946,7 +942,7 @@ class RAVE(pl.LightningModule):
 
         # DECODE LATENT
         with autocast(enabled=self.hparams['amp']):
-            y = self.decoder.mix(*self.decoder(z), add_noise=self.hparams['use_noise'])
+            y = self.decoder(z, add_noise=self.hparams['use_noise'])
 
         if double_z:
             y, y2 = y.chunk(2)
@@ -1055,14 +1051,18 @@ class RAVE(pl.LightningModule):
         #     step=self.global_step,
         #     cycle_size=self.hparams['kl_cycle'],
         #     warmup=self.hparams['warmup'],
-        #     min_beta=self.min_kl,
-        #     max_beta=self.max_kl,
+        #     min_beta=self.hparams['min_beta'],
+        #     max_beta=self.hparams['max_beta'],
         # )
         beta = get_beta_kl(
-            self.global_step, self.hparams['warmup'], self.min_kl, self.max_kl)
+            self.global_step, self.hparams['warmup'],
+            self.hparams['min_beta'], self.hparams['min_beta'])
         loss_kld = beta * kl
 
-        beta_prior = self.hparams['beta_prior']
+        beta_prior = get_beta_kl(
+            self.global_step, self.hparams['warmup'], 
+            self.hparams['min_beta_prior'], self.hparams['max_beta_prior'])
+        # beta_prior = self.hparams['beta_prior']
         loss_kld_prior = beta_prior * kl_prior
 
         # loss_moment = self.moment_loss(z).mean() * self.hparams['beta_moment']
@@ -1176,8 +1176,7 @@ class RAVE(pl.LightningModule):
         if self.gimbal is not None:
             z = self.gimbal.inv(z)
 
-        y = self.decoder.mix(*self.decoder(z), 
-            add_noise=self.hparams['use_noise'])
+        y = self.decoder(z, add_noise=self.hparams['use_noise'])
         if self.pqmf is not None:
             y = self.pqmf.inverse(y)
         return y
@@ -1187,7 +1186,7 @@ class RAVE(pl.LightningModule):
         if self.gimbal is not None:
             z = self.gimbal.inv(z)
 
-        wav, loud, noise = self.decoder(z)
+        wav, loud, noise = self.decoder.parts(z)
         if pqmf and self.pqmf is not None:
             wav = self.pqmf.inverse(wav)
             loud = self.pqmf.inverse(loud)
@@ -1225,8 +1224,7 @@ class RAVE(pl.LightningModule):
             to_decode = self.gimbal.inv(to_decode)
         to_decode = self.pad_latent(to_decode)
 
-        y = self.decoder.mix(*self.decoder(to_decode), 
-            add_noise=self.hparams['use_noise'])
+        y = self.decoder(to_decode, add_noise=self.hparams['use_noise'])
         # print(x.shape, z.shape, y.shape)
 
         if self.pqmf is not None:

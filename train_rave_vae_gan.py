@@ -72,6 +72,8 @@ if __name__ == "__main__":
 
         # whether to include the discriminator feature-matching loss as part of loss_gen
         FEATURE_MATCH = setting(default=False, vae=False, gan=True)
+        # weight of feature matching distance in loss
+        FEATURE_MATCH_WEIGHT = 10.0
         # architectural parameter for the generator (specifically, the ‘loudness’ branch)
         LOUD_STRIDE = 1
         # enables the noise branch of the generator during training
@@ -90,6 +92,8 @@ if __name__ == "__main__":
         D_N_LAYERS = 4
         # stacked discriminator pooling factor
         D_STACK_FACTOR = 2
+        # normalization layer type for discriminator
+        D_NORM = None
         # changes the discriminator to operate on (real, fake) vs (fake, fake) 
         # pairs, which has the effect of making it a conditional GAN:
         # it learns whether y is a realistic reconstruction from z,
@@ -107,6 +111,8 @@ if __name__ == "__main__":
         # if this is False but FEATURE_MATCH is True,
         # there will still be a discriminator
         ADVERSARIAL_LOSS = setting(default=False, vae=False, gan=True)
+        # weight of adversarial loss
+        ADVERSARIAL_WEIGHT = 1.0
         # type of GAN loss
         MODE = "hinge"
         # stop encoder training
@@ -196,14 +202,17 @@ if __name__ == "__main__":
 
     if xfer_ckpt is not None:
         # well this is horrible
+        # these are the hyerparams which might change when transferring weights
+        # i.e. don't change the architecture
         # would be very nice if effortless_config gave a way to get just the supplied arguments...
         # maybe it would be cleaner to specify just the params to exclude actually
         # though it looks like there is no way to even get just the lists of arguments??
         xfer_hp = (
             'freeze_encoder', 'adversarial_loss', 'ged', 'feature_match',
             'pair_discriminator', 'dis_lr', 'dis_adam_betas', 'grad_clip',
-            'd_capacity', 'd_multiplier', 'd_n_layers', 'd_stack_factor',
-            'use_noise', 'amp', 'mode', 'use_norm_dist'
+            'd_capacity', 'd_multiplier', 'd_n_layers', 'd_stack_factor', 'd_norm',
+            'use_noise', 'amp', 'mode', 'use_norm_dist', 
+            'feature_match_weight', 'adversarial_weight'
         )
         # model = RAVE.load_from_checkpoint(args.TRANSFER_CKPT, **{
         model = RAVE.load_from_checkpoint(xfer_ckpt, **{
@@ -229,6 +238,7 @@ if __name__ == "__main__":
             d_multiplier=args.D_MULTIPLIER,
             d_n_layers=args.D_N_LAYERS,
             d_stack_factor=args.D_STACK_FACTOR,
+            d_norm=args.D_NORM,
             pair_discriminator=args.PAIR_DISCRIMINATOR,
             ged=args.GED,
             adversarial_loss=args.ADVERSARIAL_LOSS,
@@ -246,6 +256,8 @@ if __name__ == "__main__":
             max_beta_prior=args.MAX_BETA_PRIOR,
             cropped_latent_size=args.CROPPED_LATENT_SIZE,
             feature_match=args.FEATURE_MATCH,
+            feature_match_weight=args.FEATURE_MATCH_WEIGHT,
+            adversarial_weight=args.ADVERSARIAL_WEIGHT,
             gen_lr=args.GEN_LR,
             dis_lr=args.DIS_LR,
             gen_adam_betas=args.GEN_ADAM_BETAS,

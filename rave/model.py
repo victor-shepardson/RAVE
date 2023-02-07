@@ -502,14 +502,24 @@ class Prior(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, in_size, capacity, multiplier, n_layers):
+    def __init__(self, in_size, capacity, multiplier, n_layers, norm=None):
         super().__init__()
 
         out_size = capacity
 
-        net = [
-            wn(cc.Conv1d(in_size, out_size, 15, padding=cc.get_padding(15)))
-        ]
+        def get_norm(s):
+            if norm=='layer':
+                return (LayerNorm1d(),)
+            elif norm=='batch':
+                return (nn.BatchNorm1d(s),)
+            elif not norm:
+                return tuple()
+            raise ValueError(f'unknown discriminator norm: "{norm}"')
+
+        net = [nn.Sequential(
+            wn(cc.Conv1d(in_size, out_size, 15, padding=cc.get_padding(15))),
+            *get_norm(out_size)
+        )]
 
         for i in range(n_layers):
             in_size = out_size
@@ -525,7 +535,9 @@ class Discriminator(nn.Module):
                         stride=multiplier,
                         padding=cc.get_padding(41, multiplier),
                         groups=out_size//capacity
-                    ))))
+                    )),
+                *get_norm(out_size)))
+
 
         net.append(nn.Sequential(
             nn.LeakyReLU(.2),
@@ -535,7 +547,8 @@ class Discriminator(nn.Module):
                     out_size,
                     5,
                     padding=cc.get_padding(5),
-                ))))
+                )),
+            *get_norm(out_size)))
 
         net.append(nn.Sequential(
             nn.LeakyReLU(.2),
@@ -602,6 +615,9 @@ class RAVE(pl.LightningModule):
                  warmup,
                 #  kl_cycle,
                  mode,
+                 adversarial_weight=1.0,
+                 feature_match_weight=10.0,
+                 d_norm=None,
                  gimbal=False,
                  group_size=64,
                  encoder_norm=None,
@@ -685,7 +701,8 @@ class RAVE(pl.LightningModule):
                 in_size=2 if pair_discriminator else 1,
                 capacity=d_capacity,
                 multiplier=d_multiplier,
-                n_layers=d_n_layers
+                n_layers=d_n_layers,
+                norm=d_norm
                 ))
         else:
             self.discriminator = None
@@ -1037,8 +1054,9 @@ class RAVE(pl.LightningModule):
                     def dist(fm):
                         real, fake = fm.chunk(2)
                         return (real-fake).abs().mean()
-                feature_matching_distance = 10*sum(
-                    map(dist, feature_maps)) / len(feature_maps)
+                feature_matching_distance = (
+                    self.hparams['feature_match_weight']
+                    * sum(map(dist, feature_maps)) / len(feature_maps))
 
         else:
             pred_true = x.new_zeros(1)
@@ -1056,7 +1074,7 @@ class RAVE(pl.LightningModule):
         # )
         beta = get_beta_kl(
             self.global_step, self.hparams['warmup'],
-            self.hparams['min_beta'], self.hparams['min_beta'])
+            self.hparams['min_beta'], self.hparams['max_beta'])
         loss_kld = beta * kl
 
         beta_prior = get_beta_kl(
@@ -1069,7 +1087,7 @@ class RAVE(pl.LightningModule):
 
         loss_gen = distance + loss_kld + loss_kld_prior + phase_distance#+ loss_moment
         if self.hparams['adversarial_loss']:
-            loss_gen = loss_gen + loss_adv
+            loss_gen = loss_gen + loss_adv*self.hparams['adversarial_weight']
         if self.feature_match:
             loss_gen = loss_gen + feature_matching_distance
         p.tick("gen loss compose")

@@ -345,7 +345,7 @@ if __name__ == "__main__":
     dataset = SimpleDataset(
         args.PREPROCESSED,
         args.WAV,
-        extension="*.wav,*.aif,*.flac",
+        extension="*.wav,*.aif,*.flac,*.m4a",
         map_size=1e12,
         preprocess_function=preprocess,
         split_set="full",

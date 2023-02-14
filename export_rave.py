@@ -57,7 +57,7 @@ class TraceModel(nn.Module):
         self.encoder = pretrained.encoder
         self.decoder = pretrained.decoder
         self.gimbal = pretrained.gimbal
-        self.prior = pretrained.prior
+        self.prior_net = pretrained.prior
 
         self.register_buffer("kld_idxs", pretrained.kld_idxs)
 
@@ -142,8 +142,11 @@ class TraceModel(nn.Module):
 
         return z#, kl
 
-    @torch.jit.export
-    def encode(self, x):
+    def log_dens(self, z, mean, scale):
+        log_std = scale.clamp(-14, 3)
+        return -0.5 * (z-mean)**2 * (-2*log_std).exp() - log_std        
+
+    def _encode(self, x):
         x = self.resample.from_target_sampling_rate(x)
 
         if self.pqmf is not None:
@@ -157,7 +160,13 @@ class TraceModel(nn.Module):
         if self.deterministic:
             z = mean
         else:
-            z = self.reparametrize(mean, std)#[0]
+            z = self.reparametrize(mean, std)
+
+        return z
+
+    @torch.jit.export
+    def encode(self, x):
+        z = self._encode(x)
 
         if self.use_pca:
             z = z - self.latent_mean.unsqueeze(-1)
@@ -168,27 +177,34 @@ class TraceModel(nn.Module):
 
         return z
 
-    # @torch.jit.export
-    # def encode_amortized(self, x):
-    #     x = self.resample.from_target_sampling_rate(x)
+    @torch.jit.export
+    def perplexity(self, x):
+        z = self._encode(x)
 
-    #     if self.pqmf is not None:
-    #         x = self.pqmf(x)
+        last_z = self.last_z[:x.shape[0]]
+        prior_mean, prior_scale = self.prior_net(last_z).chunk(2,1)
+        prior_mean, prior_scale  = self.post_process_distribution(
+            prior_mean, prior_scale)
 
-    #     mean, scale = self.encoder(x).chunk(2,1)
-    #     mean, std = self.post_process_distribution(mean, scale)
-    #     var = std * std
+        self.last_z[:z.shape[0]] = z
 
-    #     mean = mean - self.latent_mean.unsqueeze(-1)
+        return -self.log_dens(z, prior_mean, prior_scale).sum()
 
-    #     mean = nn.functional.conv1d(mean, self.latent_pca.unsqueeze(-1))
-    #     var = nn.functional.conv1d(var, self.latent_pca.unsqueeze(-1).pow(2))
+    @torch.jit.export
+    def prior(self, temp: torch.Tensor, n:int=1):
+        # TODO: cache prior when also using decode
+        # related: prior won't work without decoder as it doesn't set last_z
+        # (or won't work with it if it does set last_z)
+        # need this to behave when prior+decoder are used together/separately
+        last_z = self.last_z[:n]
+        prior_mean, prior_scale = self.prior_net(last_z).chunk(2,1)
+        prior_mean, prior_scale  = self.post_process_distribution(
+            prior_mean, prior_scale)
+        z = self.reparametrize(prior_mean, prior_scale*temp)
 
-    #     mean = mean[:, :self.cropped_latent_size]
-    #     var = var[:, :self.cropped_latent_size]
-    #     std = var.sqrt()
+        self.last_z[:z.shape[0]] = z
 
-    #     return mean, std
+        return z[:, self.kld_idxs[:self.cropped_latent_size]]
 
     @torch.jit.export
     def decode(self, z):
@@ -202,34 +218,43 @@ class TraceModel(nn.Module):
         # CAT WITH SAMPLES FROM PRIOR DISTRIBUTION
         # pad_size = self.latent_size.item() - z.shape[1]
 
-        last_z = self.last_z[:z.shape[0]]
-        prior_mean, prior_scale = self.prior(last_z).chunk(2,1)
-        prior_mean, prior_scale  = self.post_process_distribution(
-            prior_mean, prior_scale)
+        # run prior once for each block
+        zs = []
+        for z_block in z.unbind(-1):
+            z_block = z_block[...,None]
 
-        if self.deterministic:
-            pad_latent = prior_mean
-            # pad_latent = torch.zeros(
-            #     z.shape[0],
-            #     pad_size,
-            #     z.shape[-1],
-            #     device=z.device,
-            # )
-        else:
-            pad_latent = self.reparametrize(prior_mean, prior_scale)
-            # pad_latent = torch.randn(
-            #     z.shape[0],
-            #     pad_size,
-            #     z.shape[-1],
-            #     device=z.device,
-            # )
-        pad_latent = pad_latent[:, self.cropped_latent_size:]
+            last_z = self.last_z[:z.shape[0]]
+            prior_mean, prior_scale = self.prior_net(last_z).chunk(2,1)
+            prior_mean, prior_scale = self.post_process_distribution(
+                prior_mean, prior_scale)
 
-        # print(last_z.shape, z.shape, pad_latent.shape)
+            if self.deterministic:
+                pad_latent = prior_mean
+                # pad_latent = torch.zeros(
+                #     z.shape[0],
+                #     pad_size,
+                #     z.shape[-1],
+                #     device=z.device,
+                # )
+            else:
+                pad_latent = self.reparametrize(prior_mean, prior_scale)
+                # pad_latent = torch.randn(
+                #     z.shape[0],
+                #     pad_size,
+                #     z.shape[-1],
+                #     device=z.device,
+                # )
 
-        z = torch.cat([z, pad_latent], 1)
+            pad_latent = pad_latent[:, self.kld_idxs[self.cropped_latent_size:]]
 
-        self.last_z[:z.shape[0]] = z
+            # print(last_z.shape, z.shape, pad_latent.shape)
+
+            z = torch.cat([z_block, pad_latent], 1)
+            zs.append(z)
+
+            self.last_z[:z.shape[0]] = z
+
+        z = torch.cat(zs, -1)
 
         if self.use_pca:
             if not self.trained_cropped:  # PERFORM PCA AFTER PADDING

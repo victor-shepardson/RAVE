@@ -208,6 +208,7 @@ class TraceModel(nn.Module):
 
     @torch.jit.export
     def decode(self, z):
+        prior_temp=0.0
         if self.trained_cropped:  # PERFORM PCA BEFORE PADDING
             z = nn.functional.conv1d(z, self.latent_pca.T.unsqueeze(-1))
             z = z + self.latent_mean.unsqueeze(-1)
@@ -216,45 +217,44 @@ class TraceModel(nn.Module):
             z = z.expand(2, z.shape[1], z.shape[2])
 
         # CAT WITH SAMPLES FROM PRIOR DISTRIBUTION
-        # pad_size = self.latent_size.item() - z.shape[1]
 
-        # run prior once for each block
-        zs = []
-        for z_block in z.unbind(-1):
-            z_block = z_block[...,None]
-
-            last_z = self.last_z[:z.shape[0]]
-            prior_mean, prior_scale = self.prior_net(last_z).chunk(2,1)
-            prior_mean, prior_scale = self.post_process_distribution(
-                prior_mean, prior_scale)
-
+        if self.use_pca:
+            pad_shape = (
+                z.shape[0], self.latent_size - z.shape[1], z.shape[2])
             if self.deterministic:
-                pad_latent = prior_mean
-                # pad_latent = torch.zeros(
-                #     z.shape[0],
-                #     pad_size,
-                #     z.shape[-1],
-                #     device=z.device,
-                # )
+                z_pad = z.new_zeros(*pad_shape)
             else:
-                pad_latent = self.reparametrize(prior_mean, prior_scale)
-                # pad_latent = torch.randn(
-                #     z.shape[0],
-                #     pad_size,
-                #     z.shape[-1],
-                #     device=z.device,
-                # )
+                z_pad = torch.randn(*pad_shape, device=z.device)
+            z = torch.cat((z,z_pad), 1)
+        else:
+            zs = []
+            # run prior once for each block
+            for z_block in z.unbind(-1):
+                z_block = z_block[...,None]
 
-            pad_latent = pad_latent[:, self.kld_idxs[self.cropped_latent_size:]]
+                last_z = self.last_z[:z.shape[0]]
+                prior_mean, prior_scale = self.prior_net(last_z).chunk(2,1)
+                prior_mean, prior_scale = self.post_process_distribution(
+                    prior_mean, prior_scale)
 
-            # print(last_z.shape, z.shape, pad_latent.shape)
+                if self.deterministic:
+                    pad_latent = prior_mean
+                else:
+                    pad_latent = torch.randn_like(prior_mean)*prior_temp
+                    # pad_latent = self.reparametrize(
+                        # prior_mean, prior_scale*prior_temp)
 
-            z = torch.cat([z_block, pad_latent], 1)
-            zs.append(z)
+                pad_latent = pad_latent[:, self.kld_idxs[
+                    self.cropped_latent_size:]]
 
-            self.last_z[:z.shape[0]] = z
+                # print(last_z.shape, z.shape, pad_latent.shape)
 
-        z = torch.cat(zs, -1)
+                z = torch.cat([z_block, pad_latent], 1)
+                zs.append(z)
+
+                self.last_z[:z.shape[0]] = z
+
+            z = torch.cat(zs, -1)
 
         if self.use_pca:
             if not self.trained_cropped:  # PERFORM PCA AFTER PADDING
@@ -262,9 +262,14 @@ class TraceModel(nn.Module):
                 z = z + self.latent_mean.unsqueeze(-1)
         else:
             z = z[:, self.kld_idxs.argsort()]
+            print(z.shape)
 
         if self.gimbal is not None:
             z = self.gimbal.inv(z)  
+            print(z.shape)
+            print(self.gimbal.log_a[self.kld_idxs])
+            print(self.gimbal.b[self.kld_idxs])
+            print(self.kld_idxs)
 
         x = self.decoder(z, add_noise=not self.deterministic)
 
@@ -294,18 +299,18 @@ for m in model.modules():
 
 logging.info("warmup forward pass")
 x = torch.zeros(1, 1, model.block_size())
-if model.pqmf is not None:
-    x = model.pqmf(x)
+# if model.pqmf is not None:
+#     x = model.pqmf(x)
 
-z = model.reparametrize(*model.split_params(model.encoder(x)))
+# z = model.reparametrize(*model.split_params(model.encoder(x)))
 
-if args.STEREO:
-    z = z.expand(2, *z.shape[1:])
+# if args.STEREO:
+#     z = z.expand(2, *z.shape[1:])
 
-y = model.decoder(z)
+# y = model.decoder(z)
 
-if model.pqmf is not None:
-    y = model.pqmf.inverse(y)
+# if model.pqmf is not None:
+#     y = model.pqmf.inverse(y)
 
 model.discriminator = None
 
@@ -324,6 +329,7 @@ resample.to_target_sampling_rate(resample.from_target_sampling_rate(x))
 logging.info("script model")
 model = TraceModel(model, resample, args.FIDELITY, args.USE_PCA)
 model(x)
+model.prior(torch.tensor(0.))
 
 model = torch.jit.script(model)
 logging.info(f"save rave_{args.NAME}.ts")

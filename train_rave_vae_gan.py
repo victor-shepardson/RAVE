@@ -203,7 +203,8 @@ if __name__ == "__main__":
     if xfer_ckpt is not None:
         # well this is horrible
         # these are the hyerparams which might change when transferring weights
-        # i.e. don't change the architecture
+        # i.e. don't change the architecture,
+        # but are stored in the model class.
         # would be very nice if effortless_config gave a way to get just the supplied arguments...
         # maybe it would be cleaner to specify just the params to exclude actually
         # though it looks like there is no way to even get just the lists of arguments??
@@ -212,7 +213,8 @@ if __name__ == "__main__":
             'pair_discriminator', 'dis_lr', 'dis_adam_betas', 'grad_clip',
             'd_capacity', 'd_multiplier', 'd_n_layers', 'd_stack_factor', 'd_norm',
             'use_noise', 'amp', 'mode', 'use_norm_dist', 
-            'feature_match_weight', 'adversarial_weight'
+            'feature_match_weight', 'adversarial_weight',
+            'min_beta', 'max_beta', 'min_beta_prior', 'max_beta_prior',
         )
         # model = RAVE.load_from_checkpoint(args.TRANSFER_CKPT, **{
         model = RAVE.load_from_checkpoint(xfer_ckpt, **{
@@ -345,7 +347,7 @@ if __name__ == "__main__":
     dataset = SimpleDataset(
         args.PREPROCESSED,
         args.WAV,
-        extension="*.wav,*.aif,*.flac,*.m4a",
+        extension="*.wav,*.aif,*.flac,*.m4a,*.mp3",
         map_size=1e12,
         preprocess_function=preprocess,
         split_set="full",

@@ -908,7 +908,7 @@ class RAVE(pl.LightningModule):
         # to align prior with posterior
         return torch.cat((z.new_zeros((*z.shape[:2], 1)), z[...,:-1]), -1)
 
-    def training_step(self, batch, batch_idx):
+    def training_step(self, batch, batch_idx, opt=True):
         p = Profiler()
         self.saved_step += 1
 
@@ -933,7 +933,7 @@ class RAVE(pl.LightningModule):
             if self.gimbal is not None:
                 q_params = self.gimbal(*q_params)
             z = self.reparametrize(*q_params)
-            shift_z = self.shift_latent(z)
+            shift_z = self.shift_latent(z.detach())
             p_params = self.split_params(self.prior(shift_z))
 
             kl = self.kld(z, *q_params, *p_params)
@@ -971,9 +971,7 @@ class RAVE(pl.LightningModule):
 
         if self.pqmf is not None:  # FULL BAND RECOMPOSITION
             distance = self.distance(target, y, y2 if use_ged else None)
-            # why run inverse pqmf on x instead of
-            # saving original audio?
-            # some trimming edge case?
+            # do inverse pqmf on target to cancel any delay it introduces
             target = self.pqmf.inverse(target)
             y = self.pqmf.inverse(y)
             if y2 is not None:
@@ -1091,6 +1089,8 @@ class RAVE(pl.LightningModule):
         if self.feature_match:
             loss_gen = loss_gen + feature_matching_distance
         p.tick("gen loss compose")
+
+        if not opt: return loss_kld, loss_kld_prior, phase_distance, distance
 
         # OPTIMIZATION
         is_disc_step = self.global_step % 2 and use_discriminator

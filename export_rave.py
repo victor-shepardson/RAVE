@@ -208,7 +208,8 @@ class TraceModel(nn.Module):
 
     @torch.jit.export
     def decode(self, z):
-        prior_temp=0.0
+        prior_temp=0.1
+
         if self.trained_cropped:  # PERFORM PCA BEFORE PADDING
             z = nn.functional.conv1d(z, self.latent_pca.T.unsqueeze(-1))
             z = z + self.latent_mean.unsqueeze(-1)
@@ -240,9 +241,9 @@ class TraceModel(nn.Module):
                 if self.deterministic:
                     pad_latent = prior_mean
                 else:
-                    pad_latent = torch.randn_like(prior_mean)*prior_temp
-                    # pad_latent = self.reparametrize(
-                        # prior_mean, prior_scale*prior_temp)
+                    # pad_latent = torch.randn_like(prior_mean)*prior_temp
+                    pad_latent = self.reparametrize(
+                        prior_mean, prior_scale*prior_temp)
 
                 pad_latent = pad_latent[:, self.kld_idxs[
                     self.cropped_latent_size:]]
@@ -262,14 +263,14 @@ class TraceModel(nn.Module):
                 z = z + self.latent_mean.unsqueeze(-1)
         else:
             z = z[:, self.kld_idxs.argsort()]
-            print(z.shape)
+            # print(z.shape)
 
         if self.gimbal is not None:
             z = self.gimbal.inv(z)  
-            print(z.shape)
-            print(self.gimbal.log_a[self.kld_idxs])
-            print(self.gimbal.b[self.kld_idxs])
-            print(self.kld_idxs)
+            # print(z.shape)
+            # print(self.gimbal.log_a[self.kld_idxs])
+            # print(self.gimbal.b[self.kld_idxs])
+            # print(self.kld_idxs)
 
         x = self.decoder(z, add_noise=not self.deterministic)
 

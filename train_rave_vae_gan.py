@@ -1,4 +1,5 @@
 import torch
+import torchaudio
 from torch.utils.data import DataLoader, random_split
 
 from rave.model import RAVE
@@ -11,6 +12,9 @@ import pytorch_lightning as pl
 from os import environ, path
 import os
 import numpy as np
+
+from scipy.interpolate import CubicSpline
+from scipy.signal import kaiserord, lfilter, firwin
 
 import GPUtil as gpu
 
@@ -148,6 +152,7 @@ if __name__ == "__main__":
         
         # batch length in audio samples
         N_SIGNAL = 65536
+        PREP_BLOCKS = 2
         # batch size
         BATCH = 16
         # generator+encoder learning rate
@@ -214,7 +219,7 @@ if __name__ == "__main__":
             'd_capacity', 'd_multiplier', 'd_n_layers', 'd_stack_factor', 'd_norm',
             'use_noise', 'amp', 'mode', 'use_norm_dist', 
             'feature_match_weight', 'adversarial_weight',
-            'min_beta', 'max_beta', 'min_beta_prior', 'max_beta_prior',
+            'min_beta', 'max_beta', 'min_beta_prior', 'max_beta_prior', 'warmup'
         )
         # model = RAVE.load_from_checkpoint(args.TRANSFER_CKPT, **{
         model = RAVE.load_from_checkpoint(xfer_ckpt, **{
@@ -278,7 +283,7 @@ if __name__ == "__main__":
     def preprocess(name):
         s = simple_audio_preprocess(
             args.SR,
-            2 * args.N_SIGNAL,
+            args.PREP_BLOCKS * args.N_SIGNAL,
         )(name)
         return None if s is None else s.astype(np.float16) #why float16 here?
     # preprocess = simple_audio_preprocess(
@@ -291,15 +296,48 @@ if __name__ == "__main__":
             return x[:-d] + x[d:]*mix
         return fn
 
-    # TODO: use scipy interpolate for better quality
     def AugmentSpeed(semitones=1):
         def fn(x):
+            # speed = 2**(np.random.randn()*semitones/36)
+            # coords = np.arange(len(x))
+            # new_coords = coords/speed
+            # new_len = int(np.max(new_coords))
+            # return np.interp(coords[:new_len], new_coords[:new_len], x[:new_len])
+
+            speed = 2**((np.random.rand()*2-1)*semitones/12)
+            # x = torch.from_numpy(x).float()
+            # x = torchaudio.functional.resample(
+            #     x, args.SR, round(args.SR/speed),
+            #     lowpass_filter_width=4,
+            #     rolloff=0.9475937167399596,
+            #     resampling_method="kaiser_window",
+            #     beta=14.769656459379492,)
+            # return x.numpy()
+            if speed > 1:
+                nyq_rate = args.SR / 2.0
+                cutoff_hz = nyq_rate / speed
+                # The desired width of the transition from pass to stop,
+                # relative to the Nyquist rate.  We'll design the filter
+                # with a 5 Hz transition width.
+                width = speed / 2
+                # The desired attenuation in the stop band, in dB.
+                ripple_db = 100.0
+                # Compute the order and Kaiser parameter for the FIR filter.
+                N, beta = kaiserord(ripple_db, width)
+                # The cutoff frequency of the filter.
+                # Use firwin with a Kaiser window to create a lowpass FIR filter.
+                taps = firwin(N, cutoff_hz/nyq_rate, window=('kaiser', beta))
+                # Use lfilter to filter x with the FIR filter.
+                x = lfilter(taps, 1.0, x)
+
             coords = np.arange(len(x))
-            speed = 2**(np.random.randn()*semitones/36)
-            # print(f'{speed=}')
             new_coords = coords/speed
             new_len = int(np.max(new_coords))
-            return np.interp(coords[:new_len], new_coords[:new_len], x[:new_len])
+            interp = CubicSpline(
+                coords, x, axis=0, 
+                bc_type='not-a-knot', extrapolate='periodic')
+            return interp(new_coords[:new_len])
+            # return np.interp(coords[:new_len], new_coords[:new_len], filtered_x[:new_len])
         return fn
 
     def AugmentDistort(max_gain=32):

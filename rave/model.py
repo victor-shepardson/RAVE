@@ -839,9 +839,9 @@ class RAVE(pl.LightningModule):
         return lin + log
 
     def clip_log_scale(self, log_scale):
-        return log_scale.clamp(-14, 3)
+        return log_scale.clamp(-14, 14)
 
-    def reparametrize(self, mean, scale):
+    def reparametrize(self, mean, scale, temp=1):
         if self.cropped_latent_size > 0:
             return mean
         else:
@@ -852,7 +852,7 @@ class RAVE(pl.LightningModule):
                 """)
             log_std = self.clip_log_scale(scale)
             u = torch.randn_like(mean)
-            return u * log_std.exp() + mean
+            return u * log_std.exp() * temp + mean
 
     def log_dens(self, z, mean, scale):
         log_std = self.clip_log_scale(scale)
@@ -1090,7 +1090,8 @@ class RAVE(pl.LightningModule):
             loss_gen = loss_gen + feature_matching_distance
         p.tick("gen loss compose")
 
-        if not opt: return loss_kld, loss_kld_prior, phase_distance, distance
+        if not opt: 
+            return y, loss_kld, loss_kld_prior, phase_distance, distance
 
         # OPTIMIZATION
         is_disc_step = self.global_step % 2 and use_discriminator
@@ -1176,7 +1177,7 @@ class RAVE(pl.LightningModule):
         params = p.chunk(2,1)
         return params
 
-    def encode(self, x):
+    def encode(self, x, temp=1):
         if self.pqmf is not None:
             x = self.pqmf(x)
 
@@ -1186,7 +1187,7 @@ class RAVE(pl.LightningModule):
         if self.gimbal is not None:
             params = self.gimbal(*params)
 
-        z = self.reparametrize(*params)
+        z = self.reparametrize(*params, temp=temp)
         return z
 
     def decode(self, z):

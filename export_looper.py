@@ -360,7 +360,8 @@ class LivingLooper(nn.Module):
             x: Tensor[1, sample]
             oneshot: 0 for continuation, 1 to loop the training data
         Returns:
-            Tensor[loop, sample]
+            Tensor[loop, 1, sample]
+            Tensor[loop, 1, latent]
         """
         self.step += 1
         lc = self.latency_correct
@@ -417,15 +418,15 @@ class LivingLooper(nn.Module):
         # if self.loop_index >= 0:
         self.record_length += 1
 
-        zs = self.get_frames(1).permute(1,2,0)
-        y = self.decode(zs) # loops, channels (1), time
+        zs = self.get_frames(1) # time (1), loop, latent
+        y = self.decode(zs.permute(1,2,0)) # loops, channels (1), time
 
         fade = torch.linspace(0,1,y.shape[2])
         mask = self.mask[1,:,None,None] * fade + self.mask[0,:,None,None] * (1-fade)
         y = y * mask
         self.mask[0] = self.mask[1]
 
-        return y
+        return y, zs.permute(1,0,2)
 
         # print(f'{self.loop_length}, {self.record_index}, {self.loop_index}')
 
@@ -542,12 +543,14 @@ class LivingLooper(nn.Module):
         """
         RAVE decoder
         """
+
         # case of a pre-exported RAVE model
         if self.rave is not None:
             return self.rave.decode(z)
 
         pad_size = self.n_latent_decoder - self.n_latent
 
+        # NOTE: only works for single time-step inputs
         if self.prior is not None:
             last_z = self.last_z[:z.shape[0]]
             prior_mean, prior_scale = self.prior(last_z).chunk(2,1)

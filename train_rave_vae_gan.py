@@ -298,28 +298,14 @@ if __name__ == "__main__":
 
     def AugmentSpeed(semitones=1):
         def fn(x):
-            # speed = 2**(np.random.randn()*semitones/36)
-            # coords = np.arange(len(x))
-            # new_coords = coords/speed
-            # new_len = int(np.max(new_coords))
-            # return np.interp(coords[:new_len], new_coords[:new_len], x[:new_len])
-
             speed = 2**((np.random.rand()*2-1)*semitones/12)
-            # x = torch.from_numpy(x).float()
-            # x = torchaudio.functional.resample(
-            #     x, args.SR, round(args.SR/speed),
-            #     lowpass_filter_width=4,
-            #     rolloff=0.9475937167399596,
-            #     resampling_method="kaiser_window",
-            #     beta=14.769656459379492,)
-            # return x.numpy()
+            # print(speed)
             if speed > 1:
                 nyq_rate = args.SR / 2.0
-                cutoff_hz = nyq_rate / speed
                 # The desired width of the transition from pass to stop,
-                # relative to the Nyquist rate.  We'll design the filter
-                # with a 5 Hz transition width.
-                width = speed / 2
+                # relative to the Nyquist rate.
+                width = 0.05
+                cutoff_hz = nyq_rate * max(width, (1/speed - width))
                 # The desired attenuation in the stop band, in dB.
                 ripple_db = 100.0
                 # Compute the order and Kaiser parameter for the FIR filter.
@@ -330,14 +316,14 @@ if __name__ == "__main__":
                 # Use lfilter to filter x with the FIR filter.
                 x = lfilter(taps, 1.0, x)
 
-            coords = np.arange(len(x))
-            new_coords = coords/speed
-            new_len = int(np.max(new_coords))
+            coords = np.arange(len(x))/speed
+            new_len = int(np.max(coords))
+            new_coords = np.arange(new_len)
+            # print(len(x), new_len)
             interp = CubicSpline(
                 coords, x, axis=0, 
                 bc_type='not-a-knot', extrapolate='periodic')
             return interp(new_coords[:new_len])
-            # return np.interp(coords[:new_len], new_coords[:new_len], filtered_x[:new_len])
         return fn
 
     def AugmentDistort(max_gain=32):

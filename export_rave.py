@@ -210,6 +210,9 @@ class TraceModel(nn.Module):
     def decode(self, z):
         prior_temp=0.1
 
+        # idea: prior filtering: 
+        # z is 
+
         if self.trained_cropped:  # PERFORM PCA BEFORE PADDING
             z = nn.functional.conv1d(z, self.latent_pca.T.unsqueeze(-1))
             z = z + self.latent_mean.unsqueeze(-1)
@@ -329,8 +332,11 @@ resample.to_target_sampling_rate(resample.from_target_sampling_rate(x))
 
 logging.info("script model")
 model = TraceModel(model, resample, args.FIDELITY, args.USE_PCA)
+
 model(x)
 model.prior(torch.tensor(0.))
+# idea: compare +3 to -3 for each latent individually (others at 0)
+# set sign of latent based on amplitude of a high-pass filtered decoder output
 
 model = torch.jit.script(model)
 logging.info(f"save rave_{args.NAME}.ts")

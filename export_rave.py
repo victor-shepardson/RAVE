@@ -30,8 +30,10 @@ class args(Config):
     # if True, the latent is sampled at zero temperature
     # and the noise branch of the decoder is turned off (!)
     DETERMINISTIC = False
-    # 
+    # if False, sort dimenions by KLD(Q,P)
     USE_PCA = True
+    #
+    PRIOR_FILTER = False
 
 
 args.parse_args()
@@ -44,11 +46,12 @@ from rave.core import search_for_run
 import numpy as np
 import math
 
-
 class TraceModel(nn.Module):
     def __init__(self, pretrained: RAVE, resample: Resampling,
-                 fidelity: float, use_pca: bool):
+                 fidelity: float, use_pca: bool, prior_filter: bool):
         super().__init__()
+
+        self.prior_filter = prior_filter
 
         latent_size = pretrained.latent_size
         self.resample = resample
@@ -97,12 +100,12 @@ class TraceModel(nn.Module):
                     latent_size = 2**math.ceil(math.log2(latent_size))
                     self.cropped_latent_size = latent_size
 
+        self.register_buffer("last_z",
+            torch.zeros(cc.MAX_BATCH_SIZE, self.latent_size, 1))
+        
         x = torch.zeros(1, 1, 2**14)
         z = self.encode(x)
         ratio = x.shape[-1] // z.shape[-1]
-
-        self.register_buffer("last_z",
-            torch.zeros(cc.MAX_BATCH_SIZE, self.latent_size, 1))
 
         self.register_buffer(
             "encode_params",
@@ -122,9 +125,9 @@ class TraceModel(nn.Module):
                 1,
             ]))
 
-
-        self.register_buffer("forward_params",
-                             torch.tensor([1, 1, 2 if args.STEREO else 1, 1]))
+        self.register_buffer(
+            "forward_params", 
+            torch.tensor([1, 1, 2 if args.STEREO else 1, 1]))
 
         self.stereo = args.STEREO
 
@@ -146,7 +149,13 @@ class TraceModel(nn.Module):
         log_std = scale.clamp(-14, 3)
         return -0.5 * (z-mean)**2 * (-2*log_std).exp() - log_std        
 
-    def _encode(self, x):
+    def product_density(self, m1, s1, m2, s2):
+        v1, v2 = s1*s1, s2*s2
+        m = (m1*v2 + m2*v1)/(v1+v2)
+        s = (v1*v2/(v1+v2)).sqrt()
+        return m, s
+
+    def encode_dist(self, x):
         x = self.resample.from_target_sampling_rate(x)
 
         if self.pqmf is not None:
@@ -155,18 +164,57 @@ class TraceModel(nn.Module):
         mean, scale = self.encoder(x).chunk(2,1)
         if self.gimbal is not None:
             mean, scale = self.gimbal(mean, scale)        
-        mean, std = self.post_process_distribution(mean, scale)
-
+        return self.post_process_distribution(mean, scale)
+    
+    def encode_full(self, x):
+        mean, scale = self.encode_dist(x)
+        
         if self.deterministic:
             z = mean
         else:
-            z = self.reparametrize(mean, std)
+            z = self.reparametrize(mean, scale)
 
+        return z
+
+    def encode_full_prior_filter(self, x):
+        mean, scale = self.encode_dist(x)
+        batch = x.shape[0]
+
+        # prior_temp = 0.2
+        
+        zs = []
+        for mean_block, scale_block in zip(mean.unbind(-1), scale.unbind(-1)):
+            mean_block = mean_block[...,None]
+            scale_block = scale_block[...,None]
+
+            last_z = self.last_z[:batch]
+
+            prior_mean, prior_scale = self._prior(last_z)
+
+            posterior_mean = mean_block
+            posterior_scale = scale_block
+            
+            mean_block, scale_block = self.product_density(
+                posterior_mean, posterior_scale, prior_mean, prior_scale)
+            
+            if self.deterministic:
+                z_block = mean_block
+            else:
+                z_block = self.reparametrize(mean_block, scale_block)
+
+            zs.append(z_block)
+
+            self.last_z[:batch] = z_block
+
+        z = torch.cat(zs, -1)
         return z
 
     @torch.jit.export
     def encode(self, x):
-        z = self._encode(x)
+        if self.prior_filter:
+            z = self.encode_full_prior_filter(x)
+        else:
+            z = self.encode_full(x)
 
         if self.use_pca:
             z = z - self.latent_mean.unsqueeze(-1)
@@ -179,7 +227,7 @@ class TraceModel(nn.Module):
 
     @torch.jit.export
     def perplexity(self, x):
-        z = self._encode(x)
+        z = self.encode_full(x)
 
         last_z = self.last_z[:x.shape[0]]
         prior_mean, prior_scale = self.prior_net(last_z).chunk(2,1)
@@ -189,6 +237,10 @@ class TraceModel(nn.Module):
         self.last_z[:z.shape[0]] = z
 
         return -self.log_dens(z, prior_mean, prior_scale).sum()
+    
+    def _prior(self, last_z):
+        prior_mean, prior_scale = self.prior_net(last_z).chunk(2,1)
+        return self.post_process_distribution(prior_mean, prior_scale)
 
     @torch.jit.export
     def prior(self, temp: torch.Tensor, n:int=1):
@@ -197,9 +249,7 @@ class TraceModel(nn.Module):
         # (or won't work with it if it does set last_z)
         # need this to behave when prior+decoder are used together/separately
         last_z = self.last_z[:n]
-        prior_mean, prior_scale = self.prior_net(last_z).chunk(2,1)
-        prior_mean, prior_scale  = self.post_process_distribution(
-            prior_mean, prior_scale)
+        prior_mean, prior_scale = self._prior(last_z)
         z = self.reparametrize(prior_mean, prior_scale*temp)
 
         self.last_z[:z.shape[0]] = z
@@ -209,9 +259,6 @@ class TraceModel(nn.Module):
     @torch.jit.export
     def decode(self, z):
         prior_temp=0.1
-
-        # idea: prior filtering: 
-        # z is 
 
         if self.trained_cropped:  # PERFORM PCA BEFORE PADDING
             z = nn.functional.conv1d(z, self.latent_pca.T.unsqueeze(-1))
@@ -237,9 +284,8 @@ class TraceModel(nn.Module):
                 z_block = z_block[...,None]
 
                 last_z = self.last_z[:z.shape[0]]
-                prior_mean, prior_scale = self.prior_net(last_z).chunk(2,1)
-                prior_mean, prior_scale = self.post_process_distribution(
-                    prior_mean, prior_scale)
+
+                prior_mean, prior_scale = self._prior(last_z)
 
                 if self.deterministic:
                     pad_latent = prior_mean
@@ -331,7 +377,7 @@ x = torch.zeros(1, 1, model.block_size())
 resample.to_target_sampling_rate(resample.from_target_sampling_rate(x))
 
 logging.info("script model")
-model = TraceModel(model, resample, args.FIDELITY, args.USE_PCA)
+model = TraceModel(model, resample, args.FIDELITY, args.USE_PCA, args.PRIOR_FILTER)
 
 model(x)
 model.prior(torch.tensor(0.))

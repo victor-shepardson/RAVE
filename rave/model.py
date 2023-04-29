@@ -937,6 +937,7 @@ class RAVE(pl.LightningModule):
             p_params = self.split_params(self.prior(shift_z))
 
             kl = self.kld(z, *q_params, *p_params)
+            # TODO: try not differentiating through sampling here?
             kl_prior = self.kld(self.reparametrize(*p_params), *p_params)
 
             kl = kl.sum() if kl is not None else 0

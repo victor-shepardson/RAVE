@@ -357,7 +357,7 @@ class LivingLooper(nn.Module):
         """
         Args:
             i: loop record index, 0 for no loop, 1-index otherwise
-            x: Tensor[1, sample]
+            x: Tensor[1, 1, sample]
             oneshot: 0 for continuation, 1 to loop the training data
         Returns:
             Tensor[loop, 1, sample]
@@ -385,8 +385,7 @@ class LivingLooper(nn.Module):
                 self.record_length = 0
                 self.mask[1,i] = 0.
             self.loop_index = i
-                
-
+        
         # eval the other loops
         mem = self.get_frames(self.max_n_context) # ctx x loop x latent
 

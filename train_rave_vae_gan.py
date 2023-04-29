@@ -410,7 +410,9 @@ if __name__ == "__main__":
     ) if args.TEST_PREPROCESSED is not None else None
 
     val = max((2 * len(dataset)) // 100, 1)
+    # val = max((2 * len(dataset)) // 100, args.LATENT_SIZE)
     train = len(dataset) - val
+    print(f'dataset sizes: {val=}, {train=}')
     train, val = random_split(
         dataset,
         [train, val],

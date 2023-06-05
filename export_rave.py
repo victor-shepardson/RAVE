@@ -34,6 +34,8 @@ class args(Config):
     USE_PCA = True
     #
     PRIOR_FILTER = False
+    #
+    USE_PRIOR = True
 
 
 args.parse_args()
@@ -48,9 +50,11 @@ import math
 
 class TraceModel(nn.Module):
     def __init__(self, pretrained: RAVE, resample: Resampling,
-                 fidelity: float, use_pca: bool, prior_filter: bool):
+                 fidelity: float, use_pca: bool, 
+                 use_prior:bool, prior_filter: bool):
         super().__init__()
 
+        self.use_prior = use_prior
         self.prior_filter = prior_filter
 
         latent_size = pretrained.latent_size
@@ -285,7 +289,10 @@ class TraceModel(nn.Module):
 
                 last_z = self.last_z[:z.shape[0]]
 
-                prior_mean, prior_scale = self._prior(last_z)
+                if self.use_prior:
+                    prior_mean, prior_scale = self._prior(last_z)
+                else:
+                    prior_mean, prior_scale = torch.zeros_like(last_z), torch.ones_like(last_z)
 
                 if self.deterministic:
                     pad_latent = prior_mean
@@ -332,8 +339,13 @@ class TraceModel(nn.Module):
             x = x.permute(1, 0, 2)
         return x
 
+    @torch.jit.export
+    def dummy(self, x):
+        return x + torch.randn_like(x)*0.001
+        
     def forward(self, x):
         return self.decode(self.encode(x))
+
 
 
 logging.info("loading model from checkpoint")
@@ -377,9 +389,12 @@ x = torch.zeros(1, 1, model.block_size())
 resample.to_target_sampling_rate(resample.from_target_sampling_rate(x))
 
 logging.info("script model")
-model = TraceModel(model, resample, args.FIDELITY, args.USE_PCA, args.PRIOR_FILTER)
+model = TraceModel(
+    model, resample, args.FIDELITY, args.USE_PCA, 
+    args.USE_PRIOR, args.PRIOR_FILTER)
 
 model(x)
+# model.decode(model.encode(x))
 model.prior(torch.tensor(0.))
 # idea: compare +3 to -3 for each latent individually (others at 0)
 # set sign of latent based on amplitude of a high-pass filtered decoder output

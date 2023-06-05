@@ -88,7 +88,7 @@ class ResidualStack(nn.Module):
                         ),
                         dilation=3**i,
                         bias=bias,
-                        groups=max(1, dim//group_size)#4#dim//min(dim, 16),
+                        groups=max(1, dim//group_size)
                     )))
 
             seq.append(nn.LeakyReLU(.2))
@@ -244,6 +244,7 @@ class Generator(nn.Module):
                  padding_mode,
                  bias=False,
                  script=True,
+                 linear_path=True,
                  block_depth=2
             ):
         super().__init__()
@@ -269,13 +270,21 @@ class Generator(nn.Module):
             in_dim = out_dim
             out_dim = out_dim * n // r
 
+            prev_layer_idx = -1
+            
+            if i==0:
+                prev_layer_idx -= 1
+            elif not linear_path:
+                net.append(nn.LeakyReLU(.2))
+                prev_layer_idx -= 1
+
             net.append(
                 UpsampleLayer(
                     in_dim,
                     out_dim,
                     r,
                     padding_mode,
-                    cumulative_delay=net[-2 if i==0 else -1].cumulative_delay,
+                    cumulative_delay=net[prev_layer_idx].cumulative_delay,
                 ))
             net.append(
                 ResidualStack(
@@ -290,7 +299,7 @@ class Generator(nn.Module):
                 ))
 
         # self.net = maybe_script(cc.CachedSequential(*net))
-        self.net =cc.CachedSequential(*net)
+        self.net = cc.CachedSequential(*net)
 
         wave_gen = wn(
             cc.Conv1d(
@@ -387,6 +396,7 @@ class Encoder(nn.Module):
                  norm=None,
                  bias=False,
                  script=True,
+                 linear_path=True
                  ):
         super().__init__()
         maybe_wn = (lambda x:x) if norm=='batch' else wn
@@ -417,13 +427,15 @@ class Encoder(nn.Module):
             in_dim = out_dim
             out_dim = out_dim * r // n
 
-            if norm is not None:
-                net.append(norm(in_dim))
             prev_layer_idx = -1
             if norm is not None:
+                net.append(norm(in_dim))
                 prev_layer_idx -= 1
-            # if i>0:
-                # prev_layer_idx -= 1
+
+            if not linear_path:
+                net.append(nn.LeakyReLU(.2))
+                prev_layer_idx -= 1
+
             net.append(
                 ResidualStack(
                     in_dim,
@@ -585,7 +597,7 @@ class Gimbal(nn.Module):
         self.b = nn.Parameter(torch.zeros(size, 1))
 
     def forward(self, mean, log_scale):
-        return mean * self.log_a.exp() + self.b, log_scale + self.log_a
+        return mean * self.log_a.float().exp() + self.b, log_scale + self.log_a
 
     def inv(self, z):
         return (z-self.b) / self.log_a.exp()
@@ -620,6 +632,7 @@ class RAVE(pl.LightningModule):
                  d_norm=None,
                  gimbal=False,
                  group_size=64,
+                 linear_path=True,
                  encoder_norm=None,
                  no_latency=False,
                  min_beta=1e-6,
@@ -664,6 +677,7 @@ class RAVE(pl.LightningModule):
             encoder_norm,
             bias,
             script,
+            linear_path=linear_path
         )
         self.decoder = Generator(
             latent_size,
@@ -679,6 +693,7 @@ class RAVE(pl.LightningModule):
             "causal" if no_latency else "centered",
             bias,
             script,
+            linear_path=linear_path
         )
 
         if gimbal:
@@ -1454,3 +1469,6 @@ class RAVE(pl.LightningModule):
                 f"audio_{tag}", y, self.saved_step.item(), self.sr)
 
         self.idx += 1
+
+
+

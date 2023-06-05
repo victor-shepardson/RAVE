@@ -9,6 +9,25 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 import librosa as li
 from pathlib import Path
 
+def degroup(conv):
+    if conv.groups==1:
+        return
+
+    w_group = conv.weight.data
+    rg = conv.weight.requires_grad
+    w_full = w_group.new_zeros(
+        conv.out_channels, conv.in_channels, conv.kernel_size[0], requires_grad=False)
+    for i in range(conv.groups):
+        out_steps = conv.out_channels // conv.groups
+        in_steps = conv.in_channels // conv.groups
+        out_slice = slice(i*out_steps, (i+1)*out_steps)
+        in_slice = slice(i*in_steps, (i+1)*in_steps)
+        w_full[out_slice, in_slice] = w_group[out_slice]
+
+    w_full.requires_grad_(rg)
+    conv.weight.data = w_full
+    conv.groups = 1
+
 def gauss_window(pts, scale, device='cpu'):
     x = torch.linspace(-scale, scale, pts, device=device)
     return (-x*x).exp()
@@ -208,7 +227,7 @@ class Loudness(nn.Module):
 
 def amp_to_impulse_response(amp, target_size):
     """
-    transforms frequecny amps to ir on the last dimension
+    transforms frequency amps to ir on the last dimension
     """
     amp = torch.stack([amp, torch.zeros_like(amp)], -1)
     amp = torch.view_as_complex(amp)

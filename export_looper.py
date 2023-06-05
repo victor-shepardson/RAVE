@@ -14,7 +14,7 @@ import numpy as np
 
 import cached_conv as cc
 from rave.model import RAVE
-from rave.core import search_for_run
+from rave.core import search_for_run, degroup
 
 from rave.weight_norm import remove_weight_norm
 
@@ -25,6 +25,8 @@ class args(Config):
     TEST = 1
     # model checkpoint path
     CKPT = None
+    # remove grouped convs
+    DEGROUP = False
     # exported rave / rave+prior / neutone model
     # note that older models might not work (if they don't support batching)
     TS = None
@@ -527,7 +529,7 @@ class LivingLooper(nn.Module):
 
         # z = self.encoder(x)[:,:self.n_latent]
 
-        mean, scale = self.encoder(x).chunk(2,1)
+        mean, scale = self.encoder(x, double=False).chunk(2,1)
         if self.gimbal is not None:
             mean, scale = self.gimbal(mean, scale)    
         # reorder+crop    
@@ -598,6 +600,12 @@ if args.CKPT is not None:
         if hasattr(m, "weight_g"):
             remove_weight_norm(m)
 
+    if args.DEGROUP:
+        for n,m in model.named_modules():
+            if isinstance(m, torch.nn.Conv1d) and m.groups > 1 and 'discriminator' not in n:
+                print(f'degrouping {n}')
+                degroup(m)
+
     # if args.LATENT_SIZE is not None:
         # model.crop_latent_space(int(args.LATENT_SIZE))
 
@@ -605,6 +613,9 @@ elif args.TS is not None:
     logging.info("loading RAVE model from torchscript")
 
     model = torch.jit.load(args.TS)
+
+    if args.DEGROUP:
+        print("warning: can't degroup pre-exported model")
 
     if args.LATENT_SIZE is not None:
         logging.warn("torchscript models assumed to already be cropped")

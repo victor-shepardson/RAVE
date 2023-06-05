@@ -14,7 +14,8 @@ import os
 import numpy as np
 
 from scipy.interpolate import CubicSpline
-from scipy.signal import kaiserord, lfilter, firwin
+from scipy.stats import bernoulli
+from scipy.signal import kaiserord, lfilter, firwin, butter, sosfilt
 
 import GPUtil as gpu
 
@@ -28,6 +29,8 @@ if __name__ == "__main__":
     class args(Config):
         groups = ["vae", "gan"]
 
+        PRUNE = False
+
         PROFILE = False
         CKPT_EVERY = 30
 
@@ -39,6 +42,10 @@ if __name__ == "__main__":
         CAPACITY = 32
         # extra inner width in resblocks
         BOOM = 2
+        # min size for grouped convs in resnets
+        GROUP_SIZE = 64
+        # whether to remove nonlinearities between resblocks
+        LINEAR_PATH = True
         # number of latent dimensions before pruning
         LATENT_SIZE = 128
         # passed directly to conv layers apparently
@@ -183,6 +190,10 @@ if __name__ == "__main__":
         AUG_SPEED_SEMITONES = 0.1
         AUG_DELAY_CHANCE = 0.0
         AUG_DELAY_SAMPLES = 512
+        AUG_EQ_LP_CHANCE = 0.0
+        AUG_EQ_BAND_CHANCE = 0.5
+        AUG_EQ_BAND_NUM = 0
+        AUG_EQ_LS_CHANCE = 0.0
         AUG_GAIN_DB = 12
 
         # different allpass filter for input and target
@@ -232,6 +243,8 @@ if __name__ == "__main__":
             data_size=args.DATA_SIZE,
             capacity=args.CAPACITY,
             boom=args.BOOM,
+            group_size=args.GROUP_SIZE,
+            linear_path=args.LINEAR_PATH,
             latent_size=args.LATENT_SIZE,
             ratios=args.RATIOS,
             narrow=args.NARROW,
@@ -289,6 +302,26 @@ if __name__ == "__main__":
     # preprocess = simple_audio_preprocess(
     #     args.SR, 2 * args.N_SIGNAL)
 
+    def AugmentEQ(p_lp=0.8, p_bp=0.6, n_bp=2, p_ls=0.5):
+        def fn(x):
+            if bernoulli.rvs(p_lp):
+                f = 80 * 2 ** (8*np.random.rand())
+                sos = butter(1, f, 'lp', fs=args.SR, output='sos')
+                x = sosfilt(sos, x)
+            if bernoulli.rvs(p_ls):
+                f = 40 * 2 ** (4*np.random.rand())
+                w = np.random.rand()**0.5
+                sos = butter(1, f, 'lp', fs=args.SR, output='sos')
+                x = x - w*sosfilt(sos, x)
+            for _ in range(n_bp):
+                if bernoulli.rvs(p_bp):
+                    f = 160 * 2 ** (5*np.random.rand())
+                    sos = butter(1, (f,f), 'bp', fs=args.SR, output='sos')
+                    w = np.random.rand()*2-1
+                    x = x + w*sosfilt(sos, x)
+            return x
+        return fn
+
     def AugmentDelay(max_delay=512):
         def fn(x):
             d = np.random.randint(1, max_delay)
@@ -327,11 +360,14 @@ if __name__ == "__main__":
         return fn
 
     def AugmentDistort(max_gain=32):
+        eq = AugmentEQ(p_lp=0.7, p_bp=0.5, n_bp=3, p_ls=0.3)
         def fn(x):
             mix = np.random.rand()**2
-            gain = 1 + np.random.rand()**2 * (max_gain-1)
+            x_eq = eq(x)
+            norm = min(1/np.max(np.abs(x_eq))/4, 32)
+            gain = 1 + np.random.rand()**3 * (max_gain-1)
             # print(f'{mix=}, {gain=}')
-            return np.tanh(x*gain) * mix + x * (1-mix)
+            return np.tanh(x_eq*norm*gain)/norm * mix + x * (1-mix)
         return fn
         
     def augment_split(x):
@@ -362,11 +398,14 @@ if __name__ == "__main__":
         return {tag: augment_split(x) for tag in ('source', 'target')}
 
     def no_split(x): 
-        x = Dequantize(16)(x)
-        return {
-            'source': x.astype(np.float32),
-            'target': x.astype(np.float32),
-            }
+        x = augment_split(x)
+        return {tag: x for tag in ('source', 'target')}
+
+        # x = Dequantize(16)(x)
+        # return {
+        #     'source': x.astype(np.float32),
+        #     'target': x.astype(np.float32),
+        #     }
 
     dataset = SimpleDataset(
         args.PREPROCESSED,
@@ -383,6 +422,11 @@ if __name__ == "__main__":
                 max_delay=args.AUG_DELAY_SAMPLES), p=args.AUG_DELAY_CHANCE),
             RandomApply(AugmentDistort(
                 max_gain=args.AUG_DISTORT_GAIN), p=args.AUG_DISTORT_CHANCE),
+            AugmentEQ(
+                p_lp=args.AUG_EQ_LP_CHANCE, 
+                p_bp=args.AUG_EQ_BAND_CHANCE,
+                n_bp=args.AUG_EQ_BAND_NUM,
+                p_ls=args.AUG_EQ_LS_CHANCE),
             RandomCrop(args.N_SIGNAL),
             split if args.SPLIT_ALLPASS else no_split,
             AugmentGain(db=args.AUG_GAIN_DB),
@@ -492,7 +536,12 @@ if __name__ == "__main__":
     if test is not None:
         val_sets.append(test)
 
-    if args.PROFILE:
+    if args.PRUNE:
+        for p in [0., 0.1, 0.2, 0.3, 0.5, 0.8, 0.9, 0.95, 0.97, 0.99]:
+            model.prune(p)
+            trainer.validate(model, [val, test])
+
+    elif args.PROFILE:
         from torch.profiler import profile, ProfilerActivity
         # from torch.cuda import nvtx
         with profile(
@@ -501,6 +550,7 @@ if __name__ == "__main__":
             ) as prof:
             trainer.fit(model, train, val_sets, ckpt_path=run)
         prof.export_chrome_trace("rave_trace.json")
+
     else:
         trainer.fit(model, train, [val, test], ckpt_path=run)
 

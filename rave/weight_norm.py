@@ -42,6 +42,7 @@ def weight_norm(module: T_module) -> T_module:
 def remove_weight_norm(module: T_module) -> T_module:
     for k, hook in module._forward_pre_hooks.items():
         if hasattr(hook, 'is_weight_norm') and hook.is_weight_norm:
+            # print(module)
             weight = _weight_norm(module.weight_v, module.weight_g, 0)
             delattr(module, 'weight')
             del module._parameters['weight_g']
@@ -49,4 +50,5 @@ def remove_weight_norm(module: T_module) -> T_module:
             module.weight = Parameter(weight.data)
 
             del module._forward_pre_hooks[k]
-            return module
+            return True
+        return False

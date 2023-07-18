@@ -386,9 +386,6 @@ class LivingLooper(nn.Module):
                 self.record_length = 0
                 self.mask[1,i] = 0.
             self.loop_index = i
-        
-        # eval the other loops
-        mem = self.get_frames(self.max_n_context) # ctx x loop x latent
 
         # advance record head
         self.advance()
@@ -400,7 +397,15 @@ class LivingLooper(nn.Module):
             z_i = z[0,:,0] # remove batch, time dims
             # inputs have a delay through the soundcard and RAVE encoder,
             # so store them latency_correct frames in the past
-            self.record(z_i, i, self.latency_correct)
+            for dt in range(self.latency_correct, 0, -1):
+                # this loop is fudging it to accomodate latency_correct > 1
+                # while still allowing recent context in LL models...
+                # could also use the RAVE prior to get another frame here?
+                self.record(z_i, i, dt)
+            # self.record(z_i, i, self.latency_correct)
+
+        # eval the other loops
+        mem = self.get_frames(self.max_n_context, 1) # ctx x loop x latent
 
         # print(f'{feature.shape=}')
         for j,loop in enumerate(self.loops):

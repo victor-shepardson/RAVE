@@ -1425,6 +1425,7 @@ class RAVE(pl.LightningModule):
         
 
     def validation_epoch_end(self, outs):
+
         for (out, tag) in zip(outs, ('valid', 'test')):
 
             audio, z, klds = list(zip(*out))
@@ -1467,6 +1468,19 @@ class RAVE(pl.LightningModule):
             y = torch.cat(audio[:1+n//audio[0].shape[0]], 0)[:n].reshape(-1)
             self.logger.experiment.add_audio(
                 f"audio_{tag}", y, self.saved_step.item(), self.sr)
+            
+        # decoder-only audio
+        t = 1024
+        z = torch.randn(1, self.latent_size, t, device=y.device)
+        y = self.decode(z).reshape(-1)
+        self.logger.experiment.add_audio(
+            "audio_white", y, self.saved_step.item(), self.sr)
+        n = 8
+        z = torch.randn(
+            n, self.latent_size, t//n, device=y.device).cumsum(-1)*2*n/t
+        y = self.decode(z).reshape(-1)
+        self.logger.experiment.add_audio(
+            "audio_brown", y, self.saved_step.item(), self.sr)
 
         self.idx += 1
 

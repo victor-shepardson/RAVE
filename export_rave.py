@@ -212,6 +212,16 @@ class TraceModel(nn.Module):
 
         z = torch.cat(zs, -1)
         return z
+    
+    def crop(self, z):
+        if self.use_pca:
+            z = z - self.latent_mean.unsqueeze(-1)
+            z = nn.functional.conv1d(z, self.latent_pca.unsqueeze(-1))
+            z = z[:, :self.cropped_latent_size]
+        else:
+            z = z[:, self.kld_idxs[:self.cropped_latent_size]]
+        return z
+
 
     @torch.jit.export
     def encode(self, x):
@@ -220,14 +230,14 @@ class TraceModel(nn.Module):
         else:
             z = self.encode_full(x)
 
-        if self.use_pca:
-            z = z - self.latent_mean.unsqueeze(-1)
-            z = nn.functional.conv1d(z, self.latent_pca.unsqueeze(-1))
-            z = z[:, :self.cropped_latent_size]
-        else:
-            z = z[:, self.kld_idxs[:self.cropped_latent_size]]
-
-        return z
+        return self.crop(z)
+        # if self.use_pca:
+        #     z = z - self.latent_mean.unsqueeze(-1)
+        #     z = nn.functional.conv1d(z, self.latent_pca.unsqueeze(-1))
+        #     z = z[:, :self.cropped_latent_size]
+        # else:
+        #     z = z[:, self.kld_idxs[:self.cropped_latent_size]]
+        # return z
 
     @torch.jit.export
     def perplexity(self, x):

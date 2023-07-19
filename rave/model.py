@@ -1477,10 +1477,20 @@ class RAVE(pl.LightningModule):
             "audio_white", y, self.saved_step.item(), self.sr)
         n = 8
         z = torch.randn(
-            n, self.latent_size, t//n, device=y.device).cumsum(-1)*2*n/t
+            n, self.latent_size, t//n, device=y.device).cumsum(-1)*2*(n/t)**0.5
         y = self.decode(z).reshape(-1)
         self.logger.experiment.add_audio(
             "audio_brown", y, self.saved_step.item(), self.sr)
+        n = 16
+        z = (
+            torch.ones(n, self.latent_size, t//n, device=y.device) 
+            * torch.randn(n, self.latent_size, 1, device=y.device)
+        )
+        y = self.decode(z).reshape(-1)
+        self.logger.experiment.add_audio(
+            "audio_constant", y, self.saved_step.item(), self.sr)
+
+
 
         self.idx += 1
 

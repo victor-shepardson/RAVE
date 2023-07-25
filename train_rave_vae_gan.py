@@ -118,6 +118,9 @@ if __name__ == "__main__":
         # this should correspond to a more expressive likelihood
         # (and possibly be more compatible with the adversarial loss)
         GED = False
+        # also run a batch of constant / white noise latent thru GAN
+        # to improve naturalness synthetic signals to decoder
+        SYNTH_LATENT = False
         # use GAN loss for generator training
         # if this is False but FEATURE_MATCH is True,
         # there will still be a discriminator
@@ -261,6 +264,7 @@ if __name__ == "__main__":
             d_norm=args.D_NORM,
             pair_discriminator=args.PAIR_DISCRIMINATOR,
             ged=args.GED,
+            synth_latent=args.SYNTH_LATENT,
             adversarial_loss=args.ADVERSARIAL_LOSS,
             freeze_encoder=args.FREEZE_ENCODER,
             use_norm_dist=args.USE_NORM_DIST,

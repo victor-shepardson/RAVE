@@ -21,6 +21,16 @@ from .core import multiscale_stft, Loudness, mod_sigmoid
 from .core import amp_to_impulse_response, fft_convolve, get_beta_kl_cyclic_annealed, get_beta_kl, get_inst_freq_patches
 from .pqmf import CachedPQMF as PQMF
 
+def synthetic_latents_like(z):
+    white = torch.randn_like(z)
+    # brown = torch.randn_like(z).cumsum(-1) * z.shape[-1] ** -0.5
+    const = torch.randn(z.shape[0], z.shape[1], 1, device=z.device, dtype=z.dtype) * torch.ones_like(z)
+    mix = ((
+        3*torch.randn(2, z.shape[0], 1, 1, device=z.device, dtype=z.dtype)
+        ).softmax(0))
+    return (torch.stack((white, const)) * mix).sum(0)
+
+
 class Profiler:
     def __init__(self):
         self.ticks = [[time(), None]]
@@ -627,6 +637,7 @@ class RAVE(pl.LightningModule):
                  warmup,
                 #  kl_cycle,
                  mode,
+                 synth_latent=False,
                  adversarial_weight=1.0,
                  feature_match_weight=10.0,
                  d_norm=None,
@@ -937,6 +948,7 @@ class RAVE(pl.LightningModule):
 
         # GED reconstruction and pair discriminator both require
         # two z samples per input
+        synth_latent = self.hparams['synth_latent']
         use_pairs = self.hparams['pair_discriminator']
         use_ged = self.hparams['ged']
         use_discriminator = self.hparams['adversarial_loss'] or self.hparams['feature_match']
@@ -975,9 +987,13 @@ class RAVE(pl.LightningModule):
 
         # DECODE LATENT
         with autocast(enabled=self.hparams['amp']):
+            if synth_latent:
+                z = torch.cat((
+                    z, synthetic_latents_like(z)
+                ))
             y = self.decoder(z, add_noise=self.hparams['use_noise'])
 
-        if double_z:
+        if synth_latent or double_z:
             y, y2 = y.chunk(2)
         else:
             y2 = None
@@ -1013,21 +1029,27 @@ class RAVE(pl.LightningModule):
 
         feature_matching_distance = 0.
         if use_discriminator:  # DISCRIMINATION
-            # note -- could run x and target both through discriminator here
-            # shouldn't matter which one is used (?)
-            if use_pairs and not use_ged:
-                real = torch.cat((target, y), -2)
-                fake = torch.cat((y2, y), -2)
-                to_disc = torch.cat((real, fake))
-            if use_pairs and use_ged:
-                real = torch.cat((target, y), -2)
-                fake = torch.cat((y2, y), -2)
-                fake2 = torch.cat((y, y2), -2)
-                to_disc = torch.cat((real, fake, fake2))
-            if not use_pairs and use_ged:
+
+            if synth_latent:
                 to_disc = torch.cat((target, y, y2))
-            if not use_pairs and not use_ged:
-                to_disc = torch.cat((target, y))
+            else:
+                # note -- could run x and target both through discriminator here
+                # shouldn't matter which one is used (?)
+                # well it does matter if there's a denoising objective --
+                # should be targets only
+                if use_pairs and not use_ged:
+                    real = torch.cat((target, y), -2)
+                    fake = torch.cat((y2, y), -2)
+                    to_disc = torch.cat((real, fake))
+                if use_pairs and use_ged:
+                    real = torch.cat((target, y), -2)
+                    fake = torch.cat((y2, y), -2)
+                    fake2 = torch.cat((y, y2), -2)
+                    to_disc = torch.cat((real, fake, fake2))
+                if not use_pairs and use_ged:
+                    to_disc = torch.cat((target, y, y2))
+                if not use_pairs and not use_ged:
+                    to_disc = torch.cat((target, y))
 
             with autocast(enabled=self.hparams['amp']):
                 discs_features = self.discriminator(to_disc)
@@ -1045,7 +1067,7 @@ class RAVE(pl.LightningModule):
 
             # loop over parallel discriminators at 3 scales 1, 1/2, 1/4
             for s in scores:
-                if use_ged:
+                if synth_latent or use_ged:
                     real, fake = s.split((s.shape[0]//3, s.shape[0]*2//3))
                 else:
                     real, fake = s.chunk(2)
@@ -1056,7 +1078,11 @@ class RAVE(pl.LightningModule):
                 pred_fake = pred_fake + fake.mean()
 
             if self.feature_match:
-                if use_ged:
+                if synth_latent:
+                    def dist(fm):
+                        real, fake, _ = fm.chunk(3)
+                        return (real-fake).abs().mean()
+                elif use_ged:
                     def dist(fm):
                         real, fake, fake2 = fm.chunk(3)
                         return (

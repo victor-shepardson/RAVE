@@ -46,6 +46,9 @@ class args(Config):
     MEMORY = 1000
     # latency correction, latent frames
     LATENCY_CORRECT = 2
+    # latent-limiter feature
+    # last value is repeated for remaining latents
+    LIMIT_MARGIN = [0.1, 0.5, 1]
     # included in output filename
     NAME = "test"
 
@@ -66,7 +69,6 @@ class Loop(nn.Module):
     n_loops:int
     context:int
     feature_size:int
-    limit_margin:float
 
     def __init__(self, 
             index:int,
@@ -74,7 +76,8 @@ class Loop(nn.Module):
             n_context:int, # maximum time dimension of model feature
             n_memory:int, # maximum loop memory 
             n_fit:int, # maximum dataset size to fit
-            n_latent:int
+            n_latent:int,
+            limit_margin:Tensor
             ):
 
         self.index = index
@@ -84,11 +87,11 @@ class Loop(nn.Module):
         self.n_fit = n_fit
         self.n_latent = n_latent
 
-        self.limit_margin = 0.1
 
         max_n_feature = n_loops * n_context * n_latent
 
         super().__init__()
+        self.register_buffer('limit_margin', limit_margin)
 
         self.register_buffer('weights', 
             torch.empty(max_n_feature, n_latent, requires_grad=False))
@@ -102,8 +105,8 @@ class Loop(nn.Module):
             torch.empty(n_latent, requires_grad=False))
 
         # long-term memory stored at record-end
-        self.register_buffer('memory', 
-            torch.empty(n_memory, n_loops, n_latent, requires_grad=False))
+        # self.register_buffer('memory', 
+        #     torch.empty(n_memory, n_loops, n_latent, requires_grad=False))
 
     def reset(self):
         self.end_step = 0
@@ -111,7 +114,7 @@ class Loop(nn.Module):
         self.context = 0
         self.feature_size = 0
 
-        self.memory.zero_()
+        # self.memory.zero_()
         self.weights.zero_()
         self.bias.zero_()
         self.center.zero_()
@@ -135,16 +138,6 @@ class Loop(nn.Module):
         return torch.where(
             z > 1, 2*z**0.5 - 1, torch.where(
                 z < -1, 1 - 2*(-z)**0.5, z))
-
-    def store(self, memory, step):
-        """
-        Args:
-            memory: Tensor[time, loop, latent]
-            step: int
-        """
-        self.length = memory.shape[0]
-        self.end_step = step
-        self.memory[:self.length] = memory
 
     def fit(self, feature, z):
         """
@@ -211,6 +204,16 @@ class Loop(nn.Module):
         z = z.clamp(self.z_min-self.limit_margin, self.z_max+self.limit_margin)
 
         return z
+    
+    # def store(self, memory, step):
+    #     """
+    #     Args:
+    #         memory: Tensor[time, loop, latent]
+    #         step: int
+    #     """
+    #     self.length = memory.shape[0]
+    #     self.end_step = step
+    #     self.memory[:self.length] = memory
 
     # def read(self, step:int):
     #     if self.length > 0:
@@ -255,7 +258,8 @@ class LivingLooper(nn.Module):
             n_fit:int, # maximum dataset size to fit
             latency_correct:int, # in latent frames
             sr:int, # sample rate
-            latent_size:int # number of latent dims to use
+            latent_size:int, # number of latent dims to use
+            limit_margin:List[float] # limit loop latents relative to recorded min/max
             ):
         super().__init__()
 
@@ -300,6 +304,15 @@ class LivingLooper(nn.Module):
         self.n_latent = cropped_latent_size or latent_size or rave_model.latent_size
         print(f'{self.n_latent=}')
 
+        # pad the limit_margin argument and convert to tensor
+        n_fill = self.n_latent - len(limit_margin)
+        if n_fill > 0:
+            limit_margin = limit_margin + [limit_margin[-1]]*n_fill
+        elif n_fill < 0:
+            raise ValueError(f'{len(limit_margin)=} is greater than {self.n_latent=}')
+        limit_margin_t = torch.tensor(limit_margin)
+        # limit_margin_t = torch.rand(self.n_latent)
+
         if self.rave is None:
             # dynamically crop rave latents based on posterior KLD
             idxs = rave_model.kld_idxs
@@ -318,7 +331,7 @@ class LivingLooper(nn.Module):
             # else (latent_size or rave_model.latent_size))
 
         self.loops = nn.ModuleList(Loop(
-            i, n_loops, n_context, n_memory, n_fit, self.n_latent
+            i, n_loops, n_context, n_memory, n_fit, self.n_latent, limit_margin_t
         ) for i in range(n_loops))
 
         self.pqmf = rave_model.pqmf
@@ -345,7 +358,7 @@ class LivingLooper(nn.Module):
     def reset(self):
         self.record_length = 0
         self.step = 0
-        self.loop_index = -1
+        self.loop_index = 0
         self.record_index = 0
 
         for l in self.loops:
@@ -358,7 +371,8 @@ class LivingLooper(nn.Module):
     def forward(self, i:int, x, oneshot:int=0):
         """
         Args:
-            i: loop record index, 0 for no loop, 1-index otherwise
+            i: loop record index
+                0 for no loop, 1-index otherwise, negative to erase
             x: Tensor[1, 1, sample]
             oneshot: 0 for continuation, 1 to loop the training data
         Returns:
@@ -371,27 +385,29 @@ class LivingLooper(nn.Module):
         # always encode for cache, even if result is not used
         z = self.encode(x) 
 
-        if i > self.n_loops:
+        if abs(i) > self.n_loops:
+            print(f'loop {i} out of range')
             i = 0
-        # convert to zero index loop / negative for no loop
-        i = i-1
 
         i_prev = self.loop_index
         # print(i, i_prev, self.loop_length)
         if i!=i_prev: # change in loop select control
-            if i_prev >= 0: # previously on a loop
+            if i_prev > 0: # previously on a loop
                 if self.record_length >= self.min_loop: # and it was long enough
-                    self.fit_loop(i_prev, oneshot)
-            if i>=0: # starting a new loop recording
+                    # convert to 0-index here
+                    self.fit_loop(i_prev-1, oneshot)
+            if i>0: # starting a new loop recording
                 self.record_length = 0
-                self.mask[1,i] = 0.
+                self.mask[1,i-1] = 0.
+            if i<0: # erasing a loop
+                self.reset_loop(-1-i)
             self.loop_index = i
 
         # advance record head
         self.advance()
 
         # store encoded input to current loop
-        if i>=0:
+        if i>0:
             # print(x.shape)
             # slice on LHS to appease torchscript
             z_i = z[0,:,0] # remove batch, time dims
@@ -401,7 +417,7 @@ class LivingLooper(nn.Module):
                 # this loop is fudging it to accomodate latency_correct > 1
                 # while still allowing recent context in LL models...
                 # could also use the RAVE prior to get another frame here?
-                self.record(z_i, i, dt)
+                self.record(z_i, i-1, dt)
             # self.record(z_i, i, self.latency_correct)
 
         # eval the other loops
@@ -410,7 +426,7 @@ class LivingLooper(nn.Module):
         # print(f'{feature.shape=}')
         for j,loop in enumerate(self.loops):
             # skip the loop which is now recording
-            if i!=j:
+            if (i-1)!=j:
                 # generate outputs
                 z_j = loop.eval(mem)
                 # store them to memory
@@ -443,9 +459,23 @@ class LivingLooper(nn.Module):
     #         if i==j: return loop
     #     return None
 
+    def reset_loop(self, i:int):
+        """
+        call reset on a loop
+        Args:
+            i: zero indexed loop
+        """
+        for j,loop in enumerate(self.loops): 
+            if i==j:
+                loop.reset()
+        self.mask[1,i] = 0.
+
     def fit_loop(self, i:int, oneshot:int):
         """
         assemble dataset and fit a loop to it
+        Args:
+            i: zero indexed loop
+            oneshot: 0 or 1
         """
         print(f'fit {i+1}')
 
@@ -650,12 +680,15 @@ model.discriminator = None
 
 logging.info("creating looper")
 # ls = None if args.LATENT_SIZE is None else int(args.LATENT_SIZE)
+# print(f'{args.LIMIT_MARGIN=}')
 looper = LivingLooper(model, 
     args.LOOPS, args.CONTEXT, 
     args.MEMORY, args.FIT,
     args.LATENCY_CORRECT,
     args.SR,
-    args.LATENT_SIZE)
+    args.LATENT_SIZE, 
+    args.LIMIT_MARGIN
+    )
 looper.eval()
 
 # smoke test

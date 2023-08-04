@@ -13,6 +13,9 @@ import rave
 import rave.core
 import rave.dataset
 
+# fix torch device order to be same as nvidia-smi order
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string('name', None, help='Name of the run', required=True)

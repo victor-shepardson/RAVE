@@ -14,7 +14,6 @@ import rave.core
 
 from . import blocks
 
-
 class Profiler:
 
     def __init__(self):
@@ -188,6 +187,23 @@ class RAVE(pl.LightningModule):
             feature_real.append(true)
             feature_fake.append(fake)
         return feature_real, feature_fake
+    
+    @property
+    def block_size(self):
+        bs = self.encoder.encoder.downsample_factor
+        if self.pqmf is not None: 
+            bs = bs * self.pqmf.n_band
+        return bs
+    
+    def npz_to_bps(self, npz):
+        """convert (double) nats per z frame to bits per second
+        """
+        # VariationalEncoder computes 2 * KLD as the reg term, 
+        # leaving that alone for compatibility but compensating here
+        npz = npz / 2
+        return (npz 
+            * self.sr / self.block_size
+            * np.log2(np.e))   
 
     def training_step(self, batch, batch_idx):
         p = Profiler()
@@ -302,6 +318,10 @@ class RAVE(pl.LightningModule):
         if reg.item():
             loss_gen['regularization'] = reg * self.beta_factor
 
+        if isinstance(self.encoder, blocks.VariationalEncoder):
+            # log the KLD in bits/second
+            self.log("kld_bps", self.npz_to_bps(reg.item()))
+
         if self.warmed_up:
             loss_gen['feature_matching'] = feature_matching_distance
             loss_gen['adversarial'] = loss_adv
@@ -368,6 +388,11 @@ class RAVE(pl.LightningModule):
 
         y = self.decoder(z)
 
+        if self.valid_signal_crop and self.receptive_field.sum():
+            x_multiband = rave.core.valid_signal_crop(
+                x_multiband, *self.receptive_field)
+            y = rave.core.valid_signal_crop(y, *self.receptive_field)
+
         if self.pqmf is not None:
             x = self.pqmf.inverse(x_multiband)
             y = self.pqmf.inverse(y)
@@ -379,7 +404,8 @@ class RAVE(pl.LightningModule):
         if self.trainer is not None:
             self.log('validation', full_distance)
 
-        return torch.cat([x, y], -1), mean
+        # put reconstruction first for better logs
+        return torch.cat([y, x], -1), mean
 
     def validation_epoch_end(self, out):
         if not self.receptive_field.sum():

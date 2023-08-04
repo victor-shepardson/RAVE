@@ -1,4 +1,5 @@
 from functools import partial
+import math
 from typing import Callable, Optional, Sequence, Union
 
 import cached_conv as cc
@@ -520,9 +521,13 @@ class EncoderV2(nn.Module):
         spectrogram: Optional[Callable[[], Spectrogram]] = None,
         activation: Callable[[int], nn.Module] = lambda dim: nn.LeakyReLU(.2),
         adain: Optional[Callable[[int], nn.Module]] = None,
+        # prior_init:bool = False,
     ) -> None:
         super().__init__()
         dilations_list = normalize_dilations(dilations, ratios)
+
+        # store this for computing block_size
+        self.downsample_factor = math.prod(ratios)
 
         if spectrogram is not None:
             self.spectrogram = spectrogram()
@@ -581,6 +586,13 @@ class EncoderV2(nn.Module):
                     kernel_size=kernel_size,
                     padding=cc.get_padding(kernel_size),
                 )))
+        # # init close to prior for VAE
+        # if prior_init:
+        #     with torch.no_grad():
+        #         try:
+        #             net[-1].weight_g.mul_(3e0)
+        #         except AttributeError:
+        #             net[-1].weight.mul_(3e0)
 
         if recurrent_layer is not None:
             net.append(recurrent_layer(latent_size * n_out))

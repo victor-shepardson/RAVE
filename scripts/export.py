@@ -196,7 +196,7 @@ class ScriptedRAVE(nn_tilde.Module):
         self.reset_target = False,
 
     @torch.jit.export
-    def encode(self, x):
+    def encode(self, x, dist=False):
         if self.is_using_adain:
             self.update_adain()
 
@@ -207,8 +207,7 @@ class ScriptedRAVE(nn_tilde.Module):
             x = self.pqmf(x)
 
         z = self.encoder(x)
-        z = self.post_process_latent(z)
-        return z
+        return self.post_process_latent(z, dist=dist)
 
     @torch.jit.export
     def decode(self, z, from_forward: bool = False):
@@ -274,12 +273,20 @@ class ScriptedRAVE(nn_tilde.Module):
 
 class VariationalScriptedRAVE(ScriptedRAVE):
 
-    def post_process_latent(self, z):
-        z = self.encoder.reparametrize(z)[0]
+    def encode_dist(self, x):
+        return self.encode(dist=True)
+
+    def post_process_latent(self, z, dist=False):
+        z, std = self.encoder.params(z)
         z = z - self.latent_mean.unsqueeze(-1)
         z = F.conv1d(z, self.latent_pca.unsqueeze(-1))
         z = z[:, :self.latent_size]
-        return z
+        if dist:
+            std = F.conv1d(std*std, self.latent_pca.unsqueeze(-1)).sqrt()
+            std = std[:, :self.latent_size]
+            return z, std
+        else:
+            return z
 
     def pre_process_latent(self, z):
         noise = torch.randn(

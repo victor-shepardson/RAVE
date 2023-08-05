@@ -728,9 +728,13 @@ class VariationalEncoder(nn.Module):
         self.encoder = encoder()
         self.register_buffer("warmed_up", torch.tensor(0))
 
-    def reparametrize(self, z):
+    def params(self, z):
         mean, scale = z.chunk(2, 1)
         std = nn.functional.softplus(scale) + 1e-4
+        return mean, std
+
+    def reparametrize(self, z):
+        mean, std = self.params(z)
         var = std * std
         logvar = torch.log(var)
 

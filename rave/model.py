@@ -242,6 +242,30 @@ class RAVE(pl.LightningModule):
                 y_multiband,
                 *self.receptive_field,
             )
+            if reg.ndim>2:
+                # TODO: this possibly crops too much?
+                # some of these latents are within receptive field of
+                # the uncropped reconstruction,
+                # meaning the model should learn to make them arbitrarily
+                # precise,
+                # since they are useful for reconstruction but unregularized.
+                # i think this can only happen if the encoder receptive field is 
+                # longer than the generator though?
+                # otherwise the model can't distingish such parts of the posterior, as they would be out of r.f. of the zero padding.
+                # maybe it just distorts the mean KLD?
+                reg = rave.core.valid_signal_crop(
+                    reg,
+                    *self.receptive_field,
+                    dim=self.block_size
+                )
+
+        if reg.ndim>2:
+            # sum over latent
+            reg = reg.sum(1)
+
+        # mean over batch, time
+        reg = reg.mean()
+
         p.tick('crop')
 
         # DISTANCE BETWEEN INPUT AND OUTPUT
@@ -357,6 +381,11 @@ class RAVE(pl.LightningModule):
             x = self.pqmf(x)
         z, = self.encoder.reparametrize(self.encoder(x))[:1]
         return z
+    
+    def encode_dist(self, x):
+        if self.pqmf is not None and self.enable_pqmf_encode:
+            x = self.pqmf(x)
+        return self.encoder.params(self.encoder(x))
 
     def decode(self, z):
         y = self.decoder(z)

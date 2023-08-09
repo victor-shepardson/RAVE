@@ -143,6 +143,10 @@ def nonsaturating_gan(score_real, score_fake):
 
 @torch.enable_grad()
 def get_rave_receptive_field(model: nn.Module):
+    """
+    Returns:
+        left and right receptive field, in samples
+    """
     N = 2**15
     model.eval()
     device = next(iter(model.parameters())).device
@@ -180,8 +184,10 @@ def get_rave_receptive_field(model: nn.Module):
     return left_receptive_field, right_receptive_field
 
 
-def valid_signal_crop(x, left_rf, right_rf):
-    dim = x.shape[1]
+def valid_signal_crop(x, left_rf, right_rf, dim=None):
+    if dim is None:
+        # assumes dim preservation -- works for pqmf but not hidden states/latents
+        dim = x.shape[1]
     x = x[..., left_rf.item() // dim:]
     if right_rf.item():
         x = x[..., :-right_rf.item() // dim]

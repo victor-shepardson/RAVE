@@ -732,14 +732,24 @@ class VariationalEncoder(nn.Module):
         mean, scale = z.chunk(2, 1)
         std = nn.functional.softplus(scale) + 1e-4
         return mean, std
+    
+    def rsample(self, mean, std):
+        return torch.randn_like(mean) * std + mean
 
-    def reparametrize(self, z):
-        mean, std = self.params(z)
+    def reparametrize(self, h):
+        """
+        Args:
+            h: encoder output hidden state [batch, 2*latent, time]
+        Returns:
+            z: latent samples [batch, latent, time]
+            kl: kl-divergence [batch, latent, time]
+        """
+        mean, std = self.params(h)
+        z = self.rsample(mean, std)
+
         var = std * std
         logvar = torch.log(var)
-
-        z = torch.randn_like(mean) * std + mean
-        kl = (mean * mean + var - logvar - 1).sum(1).mean()
+        kl = (mean * mean + var - logvar - 1)
 
         return z, kl
 

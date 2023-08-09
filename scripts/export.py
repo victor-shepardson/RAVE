@@ -196,7 +196,12 @@ class ScriptedRAVE(nn_tilde.Module):
         self.reset_target = False,
 
     @torch.jit.export
-    def encode(self, x, dist=False):
+    def encode(self, x):
+        return self.encode_dist(x)[0]
+    
+    @torch.jit.export
+    def encode_dist(self, x):
+        "return sample, params"
         if self.is_using_adain:
             self.update_adain()
 
@@ -206,8 +211,8 @@ class ScriptedRAVE(nn_tilde.Module):
         if self.pqmf is not None:
             x = self.pqmf(x)
 
-        z = self.encoder(x)
-        return self.post_process_latent(z, dist=dist)
+        h = self.encoder(x)
+        return self.post_process_latent(h)
 
     @torch.jit.export
     def decode(self, z, from_forward: bool = False):
@@ -273,20 +278,14 @@ class ScriptedRAVE(nn_tilde.Module):
 
 class VariationalScriptedRAVE(ScriptedRAVE):
 
-    def encode_dist(self, x):
-        return self.encode(dist=True)
-
-    def post_process_latent(self, z, dist=False):
-        z, std = self.encoder.params(z)
+    def post_process_latent(self, h):
+        z, std = self.encoder.params(h)
         z = z - self.latent_mean.unsqueeze(-1)
         z = F.conv1d(z, self.latent_pca.unsqueeze(-1))
         z = z[:, :self.latent_size]
-        if dist:
-            std = F.conv1d(std*std, self.latent_pca.unsqueeze(-1)).sqrt()
-            std = std[:, :self.latent_size]
-            return z, std
-        else:
-            return z
+        std = F.conv1d(std*std, self.latent_pca.unsqueeze(-1).pow(2)).sqrt()
+        std = std[:, :self.latent_size]
+        return self.encoder.rsample(z, std), (z, std)
 
     def pre_process_latent(self, z):
         noise = torch.randn(
@@ -294,6 +293,14 @@ class VariationalScriptedRAVE(ScriptedRAVE):
             self.full_latent_size - self.latent_size,
             z.shape[-1],
         ).type_as(z)
+        # above works since latent_pca is orthonormal
+        # if the transform wasn't normal, but was still linear, could do this:
+        # noise_var = z.new_ones(z.shape[0], self.full_latent_size, z.shape[-1])
+        # pca_noise_std = F.conv1d(
+        #   noise_var, self.latent_pca.unsqueeze(-1).pow(2)
+        #   ).sqrt()[:, self.latent_size:]
+        # noise = pca_noise_std * torch.randn_like(pca_noise_std)
+
         z = torch.cat([z, noise], 1)
         z = F.conv1d(z, self.latent_pca.T.unsqueeze(-1))
         z = z + self.latent_mean.unsqueeze(-1)
@@ -304,7 +311,7 @@ class DiscreteScriptedRAVE(ScriptedRAVE):
 
     def post_process_latent(self, z):
         z = self.encoder.rvq.encode(z)
-        return z.float()
+        return z.float(), None
 
     def pre_process_latent(self, z):
         z = torch.clamp(z, 0,
@@ -320,7 +327,7 @@ class DiscreteScriptedRAVE(ScriptedRAVE):
 class WasserteinScriptedRAVE(ScriptedRAVE):
 
     def post_process_latent(self, z):
-        return z
+        return z, None
 
     def pre_process_latent(self, z):
         if self.encoder.noise_augmentation:
@@ -333,7 +340,7 @@ class WasserteinScriptedRAVE(ScriptedRAVE):
 class SphericalScriptedRAVE(ScriptedRAVE):
 
     def post_process_latent(self, z):
-        return rave.blocks.unit_norm_vector_to_angles(z)
+        return rave.blocks.unit_norm_vector_to_angles(z), None
 
     def pre_process_latent(self, z):
         return rave.blocks.angles_to_unit_norm_vector(z)

@@ -37,6 +37,10 @@ flags.DEFINE_float(
     lower_bound=.1,
     upper_bound=.999,
     help='Fidelity to use during inference (Variational mode only)')
+flags.DEFINE_integer(
+    'latent_size',
+    default=None,
+    help='alternative to `fidelity` (Variational mode only)')
 flags.DEFINE_bool(
     'stereo',
     default=False,
@@ -55,6 +59,7 @@ class ScriptedRAVE(nn_tilde.Module):
                  pretrained: rave.RAVE,
                  stereo: bool,
                  fidelity: float = .95,
+                 latent_size: int = None,
                  target_sr: bool = None) -> None:
         super().__init__()
         self.stereo = stereo
@@ -94,9 +99,10 @@ class ScriptedRAVE(nn_tilde.Module):
         self.register_buffer("fidelity", pretrained.fidelity)
 
         if isinstance(pretrained.encoder, rave.blocks.VariationalEncoder):
-            latent_size = max(
-                np.argmax(pretrained.fidelity.numpy() > fidelity), 1)
-            latent_size = 2**math.ceil(math.log2(latent_size))
+            if latent_size is None:
+                latent_size = max(
+                    np.argmax(pretrained.fidelity.numpy() > fidelity), 1)
+                latent_size = 2**math.ceil(math.log2(latent_size))
             self.latent_size = latent_size
 
         elif isinstance(pretrained.encoder, rave.blocks.DiscreteEncoder):
@@ -399,6 +405,7 @@ def main(argv):
         pretrained=pretrained,
         stereo=FLAGS.stereo,
         fidelity=FLAGS.fidelity,
+        latent_size=FLAGS.latent_size,
         target_sr=FLAGS.sr,
     )
 

@@ -655,13 +655,17 @@ class GeneratorV2(nn.Module):
             else:
                 out_channels = num_channels // 2
             net.append(activation(num_channels))
-            net.append(
-                normalization(
-                    cc.ConvTranspose1d(num_channels,
-                                       out_channels,
-                                       2 * r,
-                                       stride=r,
-                                       padding=r // 2)))
+            
+            if r > 1:
+                net.append(
+                    normalization(cc.ConvTranspose1d(
+                        num_channels, out_channels,
+                        2*r, stride=r, padding=r//2)))
+            else:
+                net.append(
+                    normalization(cc.Conv1d(
+                        num_channels, out_channels,
+                        3, padding=cc.get_padding(3))))
 
             num_channels = out_channels
 

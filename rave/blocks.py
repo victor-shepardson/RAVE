@@ -624,10 +624,13 @@ class GeneratorV2(nn.Module):
         noise_module: Optional[NoiseGeneratorV2] = None,
         activation: Callable[[int], nn.Module] = lambda dim: nn.LeakyReLU(.2),
         adain: Optional[Callable[[int], nn.Module]] = None,
+        explicit_size: int = 0,
     ) -> None:
         super().__init__()
         dilations_list = normalize_dilations(dilations, ratios)[::-1]
         ratios = ratios[::-1]
+
+        self.explicit_size = explicit_size
 
         if keep_dim:
             num_channels = np.prod(ratios) * capacity
@@ -642,7 +645,7 @@ class GeneratorV2(nn.Module):
         net.append(
             normalization(
                 cc.Conv1d(
-                    latent_size,
+                    latent_size + explicit_size,
                     num_channels,
                     kernel_size=kernel_size,
                     padding=cc.get_padding(kernel_size),

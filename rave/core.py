@@ -159,6 +159,11 @@ def get_rave_receptive_field(model: nn.Module):
         x = torch.randn(1, 1, N, requires_grad=True, device=device)
 
         z = model.encode(x)
+        # if model.decoder.explicit_size > 0:
+        #     z = torch.cat((
+        #         z, torch.randn(
+        #             *z.shape[:-2], model.decoder.explicit_size, z.shape[-1], device=z.device)
+        #         ), -2)
         y = model.decode(z)
 
         y[0, 0, N // 2].backward()
@@ -178,6 +183,8 @@ def get_rave_receptive_field(model: nn.Module):
     for module in model.modules():
         if hasattr(module, 'gru_state') or hasattr(module, 'temporal'):
             module.enable()
+    if isinstance(z, tuple):
+        z = z[0]
     ratio = x.shape[-1] // z.shape[-1]
     rate = model.sr / ratio
     print(f"Compression ratio: {ratio}x (~{rate:.1f}Hz @ {model.sr}Hz)")

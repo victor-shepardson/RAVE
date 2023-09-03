@@ -1,0 +1,11 @@
+from __gin__ import dynamic_registration
+
+import rave
+from rave import blocks
+
+rave.RAVE:
+    use_crepe = True
+    sampling_rate = 48000
+
+blocks.GeneratorV2:
+    explicit_size = 100

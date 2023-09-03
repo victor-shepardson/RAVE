@@ -119,6 +119,7 @@ class RAVE(pl.LightningModule):
         update_discriminator_every: int = 2,
         enable_pqmf_encode: bool = True,
         enable_pqmf_decode: bool = True,
+        use_crepe:bool = False,
     ):
         super().__init__()
 
@@ -129,6 +130,22 @@ class RAVE(pl.LightningModule):
         self.encoder = encoder()
         self.decoder = decoder()
         self.discriminator = discriminator()
+
+        if use_crepe:
+            import torchcrepe
+            import functools as ft
+            self.pitch = ft.partial(
+                torchcrepe.predict,
+                sample_rate=sampling_rate, 
+                hop_length=self.block_size,
+                batch_size=2048,
+                fmin=50, fmax=550, 
+                pad=True,
+                model='full',
+                decoder=torchcrepe.decode.sample,
+                cheap_resample=True)
+        else:
+            self.pitch = None
 
         self.audio_distance = audio_distance()
         self.multiband_audio_distance = multiband_audio_distance()
@@ -203,11 +220,48 @@ class RAVE(pl.LightningModule):
         npz = npz / 2
         return (npz 
             * self.sr / self.block_size
-            * np.log2(np.e))   
+            * np.log2(np.e))
+    
+    def hz_to_z(self, pitch):
+        """transformation from pitch in hz to latent space for decoder"""
+        # return pitch.log() - np.log(50.)
+        octave = pitch.log2()
+        z = torch.cat(( # subharmonics
+            octave,
+            octave - 1,
+            octave - np.log2(3),
+            octave - 2, 
+            octave - np.log2(5),
+            octave - np.log2(6),
+            octave - np.log2(7),
+        ), 1) 
+        z = torch.cat(( # musical intervals
+            z / 2, # 1 octave difference
+            z, # chroma
+            z*6/7, # fifths
+            z*6/5, # fourths
+            z*3, # whole tones
+            z*6, # semitones
+            z*12, # microtones
+        ), 1)
+        z = (torch.cat((z, z+0.25), 1) * 2*np.pi).cos() # quadrature
+        z = torch.cat((
+            z,
+            octave - 7.3, # log
+            (pitch - 50)/225 - 1, # linear
+        ), 1)
+        return z
+
 
     def training_step(self, batch, batch_idx):
         p = Profiler()
         gen_opt, dis_opt = self.optimizers()
+
+        if self.pitch is not None:
+            pitch = self.pitch(batch, device=batch.device)[:,None,:]
+        else:
+            pitch = None
+
         x = batch.unsqueeze(1)
 
         if self.pqmf is not None:
@@ -229,6 +283,10 @@ class RAVE(pl.LightningModule):
         p.tick('encode')
 
         # DECODE LATENT
+        if pitch is not None:
+            pitch_z = self.hz_to_z(pitch)
+            z = torch.cat((z, pitch_z), -2)
+
         y_multiband = self.decoder(z)
 
         p.tick('decode')
@@ -376,10 +434,20 @@ class RAVE(pl.LightningModule):
         self.log_dict(loss_gen)
         p.tick('logging')
 
-    def encode(self, x):
+    #### TODO: handle pitch in encode, encode_dist, decode
+    ### these are not used by either training or export?
+    ### they are only for testing?
+
+    def encode(self, x, **pitch_kw):
+        """returns: latent tensor or tuple of latent,pitch"""
         if self.pqmf is not None and self.enable_pqmf_encode:
-            x = self.pqmf(x)
-        z, = self.encoder.reparametrize(self.encoder(x))[:1]
+            x_bands = self.pqmf(x)
+        z, = self.encoder.reparametrize(self.encoder(x_bands))[:1]
+
+        if self.pitch is not None:
+            pitch = self.pitch(x.squeeze(1), device=x.device, **pitch_kw)[:,None,:]
+            return z, pitch
+
         return z
     
     def encode_dist(self, x):
@@ -388,6 +456,14 @@ class RAVE(pl.LightningModule):
         return self.encoder.params(self.encoder(x))
 
     def decode(self, z):
+        """
+        z: latent tensor or tuple of latent,pitch
+        """
+        if self.pitch is not None:
+            z, pitch = z
+            pitch_z = self.hz_to_z(pitch)
+            z = torch.cat((z, pitch_z), -2)
+
         y = self.decoder(z)
         if self.pqmf is not None and self.enable_pqmf_decode:
             y = self.pqmf.inverse(y)
@@ -397,6 +473,11 @@ class RAVE(pl.LightningModule):
         return self.decode(self.encode(x))
 
     def validation_step(self, batch, batch_idx):
+        if self.pitch is not None:
+            pitch = self.pitch(batch, device=batch.device)[:,None,:]
+        else:
+            pitch = None
+
         x = batch.unsqueeze(1)
 
         if self.pqmf is not None:
@@ -414,6 +495,10 @@ class RAVE(pl.LightningModule):
             mean = None
 
         z = self.encoder.reparametrize(z)[0]
+
+        if pitch is not None:
+            pitch_z = self.hz_to_z(pitch)
+            z = torch.cat((z, pitch_z), -2)
 
         y = self.decoder(z)
 

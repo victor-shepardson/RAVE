@@ -1,0 +1,3 @@
+[submodule "torchcrepe"]
+	path = torchcrepe
+	url = ./torchcrepe/

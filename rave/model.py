@@ -95,6 +95,40 @@ class BetaWarmupCallback(pl.Callback):
     def load_state_dict(self, state_dict):
         self.state.update(state_dict)
 
+# TODO: add to gin
+class PitchEmbed(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, pitch):
+        """transformation from pitch in hz to latent space for decoder"""
+        # return pitch.log() - np.log(50.)
+        octave = pitch.log2()
+        z = torch.cat(( # subharmonics
+            octave,
+            octave - 1,
+            octave - np.log2(3),
+            octave - 2, 
+            octave - np.log2(5),
+            octave - np.log2(6),
+            octave - np.log2(7),
+        ), 1) 
+        z = torch.cat(( # musical intervals
+            z / 2, # 1 octave difference
+            z, # chroma
+            z*6/7, # fifths
+            z*6/5, # fourths
+            z*3, # whole tones
+            z*6, # semitones
+            z*12, # microtones
+        ), 1)
+        z = (torch.cat((z, z+0.25), 1) * 2*np.pi).cos() # quadrature
+        z = torch.cat((
+            z,
+            octave - 7.3, # log
+            (pitch - 50)/225 - 1, # linear
+        ), 1)
+        return z
 
 @gin.configurable
 class RAVE(pl.LightningModule):
@@ -133,17 +167,13 @@ class RAVE(pl.LightningModule):
 
         if use_crepe:
             import torchcrepe
-            import functools as ft
-            self.pitch = ft.partial(
-                torchcrepe.predict,
+            self.pitch = torchcrepe.CrepePredict(
                 sample_rate=sampling_rate, 
                 hop_length=self.block_size,
-                batch_size=2048,
                 fmin=50, fmax=550, 
                 pad=True,
-                model='full',
-                decoder=torchcrepe.decode.sample,
-                cheap_resample=True)
+                model='full')
+            self.hz_to_z = PitchEmbed()
         else:
             self.pitch = None
 
@@ -221,44 +251,13 @@ class RAVE(pl.LightningModule):
         return (npz 
             * self.sr / self.block_size
             * np.log2(np.e))
-    
-    def hz_to_z(self, pitch):
-        """transformation from pitch in hz to latent space for decoder"""
-        # return pitch.log() - np.log(50.)
-        octave = pitch.log2()
-        z = torch.cat(( # subharmonics
-            octave,
-            octave - 1,
-            octave - np.log2(3),
-            octave - 2, 
-            octave - np.log2(5),
-            octave - np.log2(6),
-            octave - np.log2(7),
-        ), 1) 
-        z = torch.cat(( # musical intervals
-            z / 2, # 1 octave difference
-            z, # chroma
-            z*6/7, # fifths
-            z*6/5, # fourths
-            z*3, # whole tones
-            z*6, # semitones
-            z*12, # microtones
-        ), 1)
-        z = (torch.cat((z, z+0.25), 1) * 2*np.pi).cos() # quadrature
-        z = torch.cat((
-            z,
-            octave - 7.3, # log
-            (pitch - 50)/225 - 1, # linear
-        ), 1)
-        return z
-
 
     def training_step(self, batch, batch_idx):
         p = Profiler()
         gen_opt, dis_opt = self.optimizers()
 
         if self.pitch is not None:
-            pitch = self.pitch(batch, device=batch.device)[:,None,:]
+            pitch = self.pitch(batch)['sample'][:,None,:]
         else:
             pitch = None
 
@@ -434,7 +433,7 @@ class RAVE(pl.LightningModule):
         self.log_dict(loss_gen)
         p.tick('logging')
 
-    #### TODO: handle pitch in encode, encode_dist, decode
+    #### TODO: handle pitch in encode_dist?
     ### these are not used by either training or export?
     ### they are only for testing?
 
@@ -445,7 +444,7 @@ class RAVE(pl.LightningModule):
         z, = self.encoder.reparametrize(self.encoder(x_bands))[:1]
 
         if self.pitch is not None:
-            pitch = self.pitch(x.squeeze(1), device=x.device, **pitch_kw)[:,None,:]
+            pitch = self.pitch(x.squeeze(1), **pitch_kw)['sample'][:,None,:]
             return z, pitch
 
         return z
@@ -474,7 +473,7 @@ class RAVE(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         if self.pitch is not None:
-            pitch = self.pitch(batch, device=batch.device)[:,None,:]
+            pitch = self.pitch(batch)['sample'][:,None,:]
         else:
             pitch = None
 

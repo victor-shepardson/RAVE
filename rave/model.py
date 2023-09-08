@@ -99,6 +99,10 @@ class BetaWarmupCallback(pl.Callback):
 class PitchEmbed(nn.Module):
     def __init__(self):
         super().__init__()
+        self.register_buffer(
+            'subharmonics', torch.arange(2,8).log2())
+        self.register_buffer(
+            'intervals', torch.tensor([1/2, 1, 6/7, 6/5, 3, 6, 12]))
 
     def forward(self, pitch):
         """transformation from pitch in hz to latent space for decoder"""
@@ -106,21 +110,21 @@ class PitchEmbed(nn.Module):
         octave = pitch.log2()
         z = torch.cat(( # subharmonics
             octave,
-            octave - 1,
-            octave - np.log2(3),
-            octave - 2, 
-            octave - np.log2(5),
-            octave - np.log2(6),
-            octave - np.log2(7),
+            octave - self.subharmonics[0],
+            octave - self.subharmonics[1],
+            octave - self.subharmonics[2],
+            octave - self.subharmonics[3],
+            octave - self.subharmonics[4],
+            octave - self.subharmonics[5],
         ), 1) 
         z = torch.cat(( # musical intervals
-            z / 2, # 1 octave difference
-            z, # chroma
-            z*6/7, # fifths
-            z*6/5, # fourths
-            z*3, # whole tones
-            z*6, # semitones
-            z*12, # microtones
+            z * self.intervals[0], # 1 octave difference
+            z * self.intervals[1], # chroma
+            z * self.intervals[2], # fifths
+            z * self.intervals[3], # fourths
+            z * self.intervals[4], # whole tones
+            z * self.intervals[5], # semitones
+            z * self.intervals[6], # microtones
         ), 1)
         z = (torch.cat((z, z+0.25), 1) * 2*np.pi).cos() # quadrature
         z = torch.cat((
@@ -154,6 +158,7 @@ class RAVE(pl.LightningModule):
         enable_pqmf_encode: bool = True,
         enable_pqmf_decode: bool = True,
         use_crepe:bool = False,
+        latent_aug:bool = False,
     ):
         super().__init__()
 
@@ -203,6 +208,7 @@ class RAVE(pl.LightningModule):
         self.feature_matching_fun = feature_matching_fun
         self.num_skipped_features = num_skipped_features
         self.update_discriminator_every = update_discriminator_every
+        self.latent_aug = latent_aug
 
         self.eval_number = 0
         self.beta_factor = 1.
@@ -234,6 +240,20 @@ class RAVE(pl.LightningModule):
             feature_real.append(true)
             feature_fake.append(fake)
         return feature_real, feature_fake
+    
+    def split_features_aug(self, features):
+        feature_real = []
+        feature_fake = []
+        feature_fake_aug = []
+        for scale in features:
+            true, fake, fake_aug = zip(*map(
+                lambda x: torch.split(x, x.shape[0] // 3, 0),
+                scale,
+            ))
+            feature_real.append(true)
+            feature_fake.append(fake)
+            feature_fake_aug.append(fake_aug)
+        return feature_real, feature_fake, feature_fake_aug
     
     @property
     def block_size(self):
@@ -281,6 +301,16 @@ class RAVE(pl.LightningModule):
         z, reg = self.encoder.reparametrize(z_pre_reg)[:2]
         p.tick('encode')
 
+        if self.latent_aug:
+            scale = torch.rand(z.shape[0], 1, 1, device=z.device)*2
+            bias = torch.randn(z.shape[0], z.shape[1], 1, device=z.device)/2
+            z_aug = z * scale + bias
+            z = torch.cat((z,z_aug))
+            if pitch is not None:
+                pitch_scale = 2**(torch.randn(pitch.shape[0], 1, 1, device=z.device)/3)
+                pitch_aug = pitch*pitch_scale
+                pitch = torch.cat((pitch, pitch_aug))
+
         # DECODE LATENT
         if pitch is not None:
             pitch_z = self.hz_to_z(pitch)
@@ -316,6 +346,9 @@ class RAVE(pl.LightningModule):
                     dim=self.block_size
                 )
 
+        if self.latent_aug:
+            y_multiband, y_multiband_aug = torch.chunk(y_multiband,2)
+
         if reg.ndim>2:
             # sum over latent
             reg = reg.sum(1)
@@ -335,6 +368,8 @@ class RAVE(pl.LightningModule):
 
             x = self.pqmf.inverse(x_multiband)
             y = self.pqmf.inverse(y_multiband)
+            if self.latent_aug:
+                y_aug = self.pqmf.inverse(y_multiband_aug)
             p.tick('recompose')
 
             for k, v in multiband_distance.items():
@@ -342,6 +377,8 @@ class RAVE(pl.LightningModule):
         else:
             x = x_multiband
             y = y_multiband
+            if self.latent_aug:
+                y_aug = y_multiband_aug
 
         fullband_distance = self.audio_distance(x, y)
         p.tick('fb distance')
@@ -352,18 +389,25 @@ class RAVE(pl.LightningModule):
         feature_matching_distance = 0.
 
         if self.warmed_up:  # DISCRIMINATION
-            xy = torch.cat([x, y], 0)
-            features = self.discriminator(xy)
+            if self.latent_aug:
+                xy = torch.cat([x, y, y_aug], 0)
+                features = self.discriminator(xy)
+                feature_real, feature_fake = self.split_features(features)
+                feature_aug = feature_fake
+            else:
+                xy = torch.cat([x, y], 0)
+                features = self.discriminator(xy)
+                feature_real, feature_fake, feature_aug = self.split_features_aug(features)
 
-            feature_real, feature_fake = self.split_features(features)
 
             loss_dis = 0
             loss_adv = 0
 
             pred_real = 0
             pred_fake = 0
+            pred_aug = 0
 
-            for scale_real, scale_fake in zip(feature_real, feature_fake):
+            for scale_real, scale_fake, scale_aug in zip(feature_real, feature_fake, feature_aug):
                 current_feature_distance = sum(
                     map(
                         self.feature_matching_fun,
@@ -373,10 +417,11 @@ class RAVE(pl.LightningModule):
 
                 feature_matching_distance = feature_matching_distance + current_feature_distance
 
-                _dis, _adv = self.gan_loss(scale_real[-1], scale_fake[-1])
+                _dis, _adv = self.gan_loss(scale_real[-1], scale_aug[-1])
 
                 pred_real = pred_real + scale_real[-1].mean()
                 pred_fake = pred_fake + scale_fake[-1].mean()
+                pred_aug = pred_aug + scale_aug[-1].mean()
 
                 loss_dis = loss_dis + _dis
                 loss_adv = loss_adv + _adv
@@ -387,6 +432,7 @@ class RAVE(pl.LightningModule):
         else:
             pred_real = torch.tensor(0.).to(x)
             pred_fake = torch.tensor(0.).to(x)
+            pred_aug = torch.tensor(0.).to(x)
             loss_dis = torch.tensor(0.).to(x)
             loss_adv = torch.tensor(0.).to(x)
         p.tick('discrimination')
@@ -429,6 +475,7 @@ class RAVE(pl.LightningModule):
             self.log("loss_dis", loss_dis)
             self.log("pred_real", pred_real.mean())
             self.log("pred_fake", pred_fake.mean())
+            self.log("pred_aug", pred_aug.mean())
 
         self.log_dict(loss_gen)
         p.tick('logging')

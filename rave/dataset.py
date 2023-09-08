@@ -62,7 +62,7 @@ class AudioDataset(data.Dataset):
             ae = AudioExample.FromString(txn.get(self.keys[index]))
 
         buffer = ae.buffers[self._audio_key]
-        assert buffer.precision == AudioExample.Precision.INT16
+        assert buffer.precision == AudioExample.Precision.INT16, buffer.precision
 
         audio = np.frombuffer(buffer.data, dtype=np.int16)
         audio = audio.astype(np.float32) / (2**15 - 1)

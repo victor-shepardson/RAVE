@@ -1,7 +1,7 @@
 import logging
 import math
 import os
-from typing import Optional
+from typing import Optional, Union, Tuple
 
 logging.basicConfig(level=logging.INFO)
 logging.info("library loading")
@@ -70,11 +70,13 @@ class ScriptedRAVE(nn_tilde.Module):
         self.encoder = pretrained.encoder
         self.decoder = pretrained.decoder
 
-        if hasattr(pretrained, 'pitch'):
-            self.pitch = pretrained.pitch
+        if hasattr(pretrained, 'pitch') and pretrained.pitch is not None:
+            self.pitch_encoder = pretrained.pitch
             self.hz_to_z = pretrained.hz_to_z
+            use_pitch = True
         else:
-            self.pitch = None
+            self.pitch_encoder = None
+            use_pitch = False
 
         self.sr = pretrained.sr
 
@@ -143,36 +145,36 @@ class ScriptedRAVE(nn_tilde.Module):
 
         self.fake_adain = rave.blocks.AdaptiveInstanceNormalization(0)
 
-        if self.pitch is None:
-            self.register_method(
-                "encode",
-                in_channels=1,
-                in_ratio=1,
-                out_channels=self.latent_size,
-                out_ratio=ratio_encode,
-                input_labels=['(signal) Input audio signal'],
-                output_labels=[
-                    f'(signal) Latent dimension {i}'
-                    for i in range(self.latent_size)
-                ],
-            )
-            self.register_method(
-                "decode",
-                in_channels=self.latent_size,
-                in_ratio=ratio_encode,
-                out_channels=2 if stereo else 1,
-                out_ratio=1,
-                input_labels=[
-                    f'(signal) Latent dimension {i}'
-                    for i in range(self.latent_size)
-                ],
-                output_labels=[
-                    f'(signal) Reconstructed audio signal {channel}'
-                    for channel in channels
-                ],
-            )
-        else:
-            print('WARNING: encode/decode for nn~ not implemented when using pitch')
+        # if self.pitch_encoder is None:
+        self.register_method(
+            "encode",
+            in_channels=1,
+            in_ratio=1,
+            out_channels=self.latent_size + int(use_pitch),
+            out_ratio=ratio_encode,
+            input_labels=['(signal) Input audio signal'],
+            output_labels=[
+                f'(signal) Latent dimension {i}'
+                for i in range(self.latent_size)
+            ] + (['pitch (Hz)'] if use_pitch else []),
+        )
+        self.register_method(
+            "decode",
+            in_channels=self.latent_size + int(use_pitch),
+            in_ratio=ratio_encode,
+            out_channels=2 if stereo else 1,
+            out_ratio=1,
+            input_labels=(['pitch (Hz)'] if use_pitch else []) + [
+                f'(signal) Latent dimension {i}'
+                for i in range(self.latent_size)
+            ],
+            output_labels=[
+                f'(signal) Reconstructed audio signal {channel}'
+                for channel in channels
+            ],
+        )
+        # else:
+        #     print('WARNING: encode/decode for nn~ not implemented when using pitch')
 
         self.register_method(
             "forward",
@@ -214,7 +216,18 @@ class ScriptedRAVE(nn_tilde.Module):
 
     @torch.jit.export
     def encode(self, x):
-        return self.encode_dist(x)[0]
+        # NOTE this returns latents only, no pitch
+        d = self.encode_dist(x)
+        z = d['z']
+        if 'pitch' in d:
+            z = torch.cat((d['pitch'], z), -2)
+        return z
+    
+    @torch.jit.export
+    def pitch(self, x):
+        if self.pitch_encoder is None:
+            return torch.zeros_like(x)
+        return self.pitch_encoder(x)['sample']
     
     @torch.jit.export
     def encode_dist(self, x):
@@ -236,35 +249,35 @@ class ScriptedRAVE(nn_tilde.Module):
             x_bands = x
 
         h = self.encoder(x_bands)
-        z, z_params = self.post_process_latent(h)
+        z, (z_mean, z_std) = self.post_process_latent(h)
 
-        if self.pitch is not None:
-            r = self.pitch(x.squeeze(1))
-            pitch = r['sample'][:,None]
-            probs = r['probs'][:,None]
-            return (z, pitch), (z_params, probs)
+        d = {'z':z, 'z_mean':z_mean, 'z_std':z_std}
+
+        if self.pitch_encoder is not None:
+            r = self.pitch_encoder(x.squeeze(1))
+            d['pitch'] = r['sample'][:,None]
+            d['pitch_probs'] = r['probs'][:,None]
+            # return (z, pitch), (z_params, probs)
         
-        return z, z_params
+        # return z, z_params
+        return d
 
     @torch.jit.export
-    def decode(self, z, from_forward:bool=False):# pitch:Optional[Tensor]=None,
-        # assert (pitch is None) ^ (self.pitch is None)
+    def decode(self, z, from_forward:bool=False):
 
         if self.is_using_adain and not from_forward:
             self.update_adain()
 
-        if self.stereo:
-            z = torch.cat([z, z], 0)
-            if pitch is not None:
-                pitch = torch.cat((pitch, pitch), 0)
-
-        if self.pitch is not None:
-            z, pitch = z
+        if self.pitch_encoder is not None:
+            pitch, z = z[...,:1,:], z[...,1:,:]
             z = self.pre_process_latent(z)
             pitch_z = self.hz_to_z(pitch)
             z = torch.cat((z, pitch_z), -2)
         else:
             z = self.pre_process_latent(z)
+
+        if self.stereo:
+            z = torch.cat([z, z], 0)
 
         y = self.decoder(z)
 
@@ -281,7 +294,7 @@ class ScriptedRAVE(nn_tilde.Module):
 
     def forward(self, x):
         return self.decode(self.encode(x), from_forward=True)
-
+    
     @torch.jit.export
     def get_learn_target(self) -> bool:
         return self.learn_target[0]

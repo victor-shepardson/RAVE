@@ -756,6 +756,7 @@ class VariationalEncoder(nn.Module):
 
         var = std * std
         logvar = torch.log(var)
+        # note: this is twice the KLD
         kl = (mean * mean + var - logvar - 1)
 
         return z, kl

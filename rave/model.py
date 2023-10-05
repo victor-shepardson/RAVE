@@ -116,7 +116,7 @@ class PitchEmbed(nn.Module):
             octave - self.subharmonics[3],
             octave - self.subharmonics[4],
             octave - self.subharmonics[5],
-        ), 1) 
+        ), -2) 
         z = torch.cat(( # musical intervals
             z * self.intervals[0], # 1 octave difference
             z * self.intervals[1], # chroma
@@ -125,13 +125,13 @@ class PitchEmbed(nn.Module):
             z * self.intervals[4], # whole tones
             z * self.intervals[5], # semitones
             z * self.intervals[6], # microtones
-        ), 1)
-        z = (torch.cat((z, z+0.25), 1) * 2*np.pi).cos() # quadrature
+        ), -2)
+        z = (torch.cat((z, z+0.25), -2) * 2*np.pi).cos() # quadrature
         z = torch.cat((
             z,
             octave - 7.3, # log
             (pitch - 50)/225 - 1, # linear
-        ), 1)
+        ), -2)
         return z
 
 @gin.configurable
@@ -392,12 +392,12 @@ class RAVE(pl.LightningModule):
             if self.latent_aug:
                 xy = torch.cat([x, y, y_aug], 0)
                 features = self.discriminator(xy)
-                feature_real, feature_fake = self.split_features(features)
-                feature_aug = feature_fake
+                feature_real, feature_fake, feature_aug = self.split_features_aug(features)
             else:
                 xy = torch.cat([x, y], 0)
                 features = self.discriminator(xy)
-                feature_real, feature_fake, feature_aug = self.split_features_aug(features)
+                feature_real, feature_fake = self.split_features(features)
+                feature_aug = feature_fake
 
 
             loss_dis = 0

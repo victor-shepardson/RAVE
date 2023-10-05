@@ -207,10 +207,12 @@ def main(argv):
 
     run = rave.core.search_for_run(FLAGS.ckpt)
     if run is not None:
-        step = torch.load(run, map_location='cpu')["global_step"]
+        loaded = torch.load(run, map_location='cpu')
+        step = loaded["global_step"]
         trainer.fit_loop.epoch_loop._batches_that_stepped = step
 
     with open(os.path.join("runs", RUN_NAME, "config.gin"), "w") as config_out:
         config_out.write(gin.operative_config_str())
+
 
     trainer.fit(model, train, val, ckpt_path=run)

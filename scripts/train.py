@@ -36,7 +36,10 @@ flags.DEFINE_integer('n_signal',
 flags.DEFINE_integer('batch', 8, help='Batch size')
 flags.DEFINE_string('ckpt',
                     None,
-                    help='Path to previous checkpoint of the run')
+                    help='Path to checkpoint to continue training from')
+flags.DEFINE_string('transfer_ckpt',
+                    None,
+                    help='Path to checkpoint to initialize weights from')
 flags.DEFINE_multi_string('override', default=[], help='Override gin binding')
 flags.DEFINE_integer('workers',
                      default=8,
@@ -209,6 +212,12 @@ def main(argv):
     if run is not None:
         step = torch.load(run, map_location='cpu')["global_step"]
         trainer.fit_loop.epoch_loop._batches_that_stepped = step
+
+    transfer_run = rave.core.search_for_run(FLAGS.transfer_ckpt)
+    if transfer_run is not None:
+        print(f'transferring weights from {transfer_run}')
+        sd = torch.load(transfer_run, map_location='cpu')["state_dict"]
+        model.load_state_dict(sd, strict=False)
 
     with open(os.path.join("runs", RUN_NAME, "config.gin"), "w") as config_out:
         config_out.write(gin.operative_config_str())

@@ -119,6 +119,7 @@ class RAVE(pl.LightningModule):
         update_discriminator_every: int = 2,
         enable_pqmf_encode: bool = True,
         enable_pqmf_decode: bool = True,
+        freeze_encoder: bool = True,
     ):
         super().__init__()
 
@@ -163,6 +164,8 @@ class RAVE(pl.LightningModule):
 
         self.enable_pqmf_encode = enable_pqmf_encode
         self.enable_pqmf_decode = enable_pqmf_decode
+
+        self.freeze_encoder = freeze_encoder
 
         self.register_buffer("receptive_field", torch.tensor([0, 0]).long())
 
@@ -216,7 +219,7 @@ class RAVE(pl.LightningModule):
             x_multiband = x
         p.tick('decompose')
 
-        self.encoder.set_warmed_up(self.warmed_up)
+        self.encoder.set_warmed_up(self.warmed_up and self.freeze_encoder)
         self.decoder.set_warmed_up(self.warmed_up)
 
         # ENCODE INPUT
@@ -452,7 +455,7 @@ class RAVE(pl.LightningModule):
         audio = list(map(lambda x: x.cpu(), audio))
 
         # LATENT SPACE ANALYSIS
-        if not self.warmed_up and isinstance(self.encoder,
+        if not self.encoder.warmed_up and isinstance(self.encoder,
                                              blocks.VariationalEncoder):
             z = torch.cat(z, 0)
             z = rearrange(z, "b c t -> (b t) c")

@@ -13,12 +13,22 @@ import requests
 import torch
 import yaml
 from scipy.signal import lfilter
+import resampy
 from torch.utils import data
 from tqdm import tqdm
 from udls import AudioExample as AudioExampleWrapper
 from udls import transforms
 from udls.generated import AudioExample
 
+class RandomSpeed(transforms.Transform):
+    def __init__(self, semitones):
+        self.semitones = semitones
+    def __call__(self, x: np.ndarray):
+        rate = 2 ** ((random()*2-1) * self.semitones / 12)
+        # print(rate, x.shape)
+        x = resampy.resample(x, rate, 1)
+        # print(x.shape)
+        return x
 
 def get_derivator_integrator(sr: int):
     alpha = 1 / (1 + 1 / sr * 2 * np.pi * 10)
@@ -179,22 +189,27 @@ def get_dataset(db_path,
                 sr,
                 n_signal,
                 derivative: bool = False,
-                normalize: bool = False):
+                normalize: bool = False,
+                speed_semitones: float = 0):
     if db_path[:4] == "http":
         return HTTPAudioDataset(db_path=db_path)
     with open(os.path.join(db_path, 'metadata.yaml'), 'r') as metadata:
         metadata = yaml.safe_load(metadata)
     lazy = metadata['lazy']
 
-    transform_list = [
-        lambda x: x.astype(np.float32),
+    transform_list = [lambda x: x.astype(np.float32)]
+
+    if speed_semitones:
+        transform_list.append(RandomSpeed(speed_semitones))
+
+    transform_list.extend([
         transforms.RandomCrop(n_signal),
         transforms.RandomApply(
             lambda x: random_phase_mangle(x, 20, 2000, .99, sr),
             p=.8,
         ),
         transforms.Dequantize(16),
-    ]
+    ])
 
     if normalize:
         transform_list.append(normalize_signal)

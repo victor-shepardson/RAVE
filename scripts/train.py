@@ -51,6 +51,9 @@ flags.DEFINE_bool('derivative',
 flags.DEFINE_bool('normalize',
                   default=False,
                   help='Train RAVE on normalized signals')
+flags.DEFINE_float('speed_semitones',
+                  default=0,
+                  help='speed change data augmentation')
 flags.DEFINE_float('ema',
                    default=None,
                    help='Exponential weight averaging factor (optional)')
@@ -126,7 +129,9 @@ def main(argv):
                                        model.sr,
                                        FLAGS.n_signal,
                                        derivative=FLAGS.derivative,
-                                       normalize=FLAGS.normalize)
+                                       normalize=FLAGS.normalize,
+                                       speed_semitones=FLAGS.speed_semitones,
+                                       )
     train, val = rave.dataset.split_dataset(dataset, 98)
     num_workers = FLAGS.workers
 

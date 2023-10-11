@@ -360,6 +360,8 @@ def main(argv):
     gin.parse_config_file(os.path.join(FLAGS.run, "config.gin"))
     checkpoint = rave.core.search_for_run(FLAGS.run)
 
+    logging.info(checkpoint)
+
     pretrained = rave.RAVE()
     if checkpoint is not None:
         checkpoint = torch.load(checkpoint, map_location='cpu')
@@ -374,7 +376,7 @@ def main(argv):
                 strict=False,
             )
     else:
-        print("No checkpoint found, RAVE will remain randomly initialized")
+        logging.error("No checkpoint found, RAVE will remain randomly initialized")
     pretrained.eval()
 
     if isinstance(pretrained.encoder, rave.blocks.VariationalEncoder):

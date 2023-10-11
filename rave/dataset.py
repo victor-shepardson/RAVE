@@ -26,9 +26,60 @@ class RandomSpeed(transforms.Transform):
     def __call__(self, x: np.ndarray):
         rate = 2 ** ((random()*2-1) * self.semitones / 12)
         # print(rate, x.shape)
-        x = resampy.resample(x, rate, 1)
+        x = resampy.resample(x, rate, 1, filter='kaiser_fast')
         # print(x.shape)
         return x
+    
+class RandomGain(transforms.Transform):
+    def __init__(self, db):
+        self.db = db
+    def __call__(self, x: np.ndarray):
+        peak = np.max(np.abs(x))
+        max_db = min(self.db, np.log10(1/(peak+1e-5))*10)
+        min_db = -self.db
+        gain = 10 ** ((random()*(max_db-min_db)+min_db)/10)
+        return x*gain
+    
+# class AugmentEQ(transforms.Transform):
+#     def __init__(p_lp=0.8, p_bp=0.6, n_bp=2, p_ls=0.5):
+#         pass
+#     def __call__(x):
+#         if bernoulli.rvs(p_lp):
+#             f = 80 * 2 ** (8*np.random.rand())
+#             sos = butter(1, f, 'lp', fs=args.SR, output='sos')
+#             x = sosfilt(sos, x)
+#         if bernoulli.rvs(p_ls):
+#             f = 40 * 2 ** (4*np.random.rand())
+#             w = np.random.rand()**0.5
+#             sos = butter(1, f, 'lp', fs=args.SR, output='sos')
+#             x = x - w*sosfilt(sos, x)
+#         for _ in range(n_bp):
+#             if bernoulli.rvs(p_bp):
+#                 f = 160 * 2 ** (5*np.random.rand())
+#                 sos = butter(1, (f,f), 'bp', fs=args.SR, output='sos')
+#                 w = np.random.rand()*2-1
+#                 x = x + w*sosfilt(sos, x)
+#         return x
+
+# def AugmentDelay(max_delay=512):
+#     def fn(x):
+#         d = np.random.randint(1, max_delay)
+#         mix = (np.random.rand()*2-1)**3
+#         return x[:-d] + x[d:]*mix
+#     return fn
+
+# def AugmentDistort(max_gain=32):
+#     eq = AugmentEQ(p_lp=0.7, p_bp=0.5, n_bp=3, p_ls=0.3)
+#     def fn(x):
+#         mix = np.random.rand()**2
+#         x_eq = eq(x)
+#         norm = min(1/np.max(np.abs(x_eq))/4, 32)
+#         gain = 1 + np.random.rand()**3 * (max_gain-1)
+#         # print(f'{mix=}, {gain=}')
+#         return np.tanh(x_eq*norm*gain)/norm * mix + x * (1-mix)
+#     return fn
+
+
 
 def get_derivator_integrator(sr: int):
     alpha = 1 / (1 + 1 / sr * 2 * np.pi * 10)
@@ -190,7 +241,10 @@ def get_dataset(db_path,
                 n_signal,
                 derivative: bool = False,
                 normalize: bool = False,
-                speed_semitones: float = 0):
+                speed_semitones: float = 0,
+                gain_db: float = 0,
+                allpass_p: float = 0.8,
+                ):
     if db_path[:4] == "http":
         return HTTPAudioDataset(db_path=db_path)
     with open(os.path.join(db_path, 'metadata.yaml'), 'r') as metadata:
@@ -206,7 +260,7 @@ def get_dataset(db_path,
         transforms.RandomCrop(n_signal),
         transforms.RandomApply(
             lambda x: random_phase_mangle(x, 20, 2000, .99, sr),
-            p=.8,
+            p=allpass_p,
         ),
         transforms.Dequantize(16),
     ])
@@ -214,8 +268,12 @@ def get_dataset(db_path,
     if normalize:
         transform_list.append(normalize_signal)
 
+    if gain_db:
+        transform_list.append(RandomGain(gain_db))
+
     if derivative:
         transform_list.append(get_derivator_integrator(sr)[0])
+
 
     transform_list.append(lambda x: x.astype(np.float32))
 

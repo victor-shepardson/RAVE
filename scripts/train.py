@@ -54,6 +54,12 @@ flags.DEFINE_bool('normalize',
 flags.DEFINE_float('speed_semitones',
                   default=0,
                   help='speed change data augmentation')
+flags.DEFINE_float('gain_db',
+                  default=0,
+                  help='gain change data augmentation')
+flags.DEFINE_float('allpass_p',
+                  default=0.8,
+                  help='chance of allpass filter data augmentation')
 flags.DEFINE_float('ema',
                    default=None,
                    help='Exponential weight averaging factor (optional)')
@@ -131,6 +137,8 @@ def main(argv):
                                        derivative=FLAGS.derivative,
                                        normalize=FLAGS.normalize,
                                        speed_semitones=FLAGS.speed_semitones,
+                                       gain_db=FLAGS.gain_db,
+                                       allpass_p=FLAGS.allpass_p,
                                        )
     train, val = rave.dataset.split_dataset(dataset, 98)
     num_workers = FLAGS.workers

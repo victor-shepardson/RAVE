@@ -1,7 +1,7 @@
 import json
 import os
 from pathlib import Path
-from random import random
+from random import random, randint
 from typing import Callable, Optional, Sequence, Union
 
 import GPUtil as gpu
@@ -242,11 +242,14 @@ class MultiScaleSTFT(nn.Module):
                  sample_rate: int,
                  magnitude: bool = True,
                  normalized: bool = False,
-                 num_mels: Optional[int] = None) -> None:
+                 num_mels: Optional[int] = None,
+                 random_crop: bool = False,
+                 ) -> None:
         super().__init__()
         self.scales = scales
         self.magnitude = magnitude
         self.num_mels = num_mels
+        self.random_crop = random_crop
 
         self.stfts = []
         self.mel_scales = []
@@ -275,8 +278,13 @@ class MultiScaleSTFT(nn.Module):
     def forward(self, x: torch.Tensor) -> Sequence[torch.Tensor]:
         x = rearrange(x, "b c t -> (b c) t")
         stfts = []
-        for stft, mel in zip(self.stfts, self.mel_scales):
+        for stft, mel, scale in zip(self.stfts, self.mel_scales, self.scales):
+            if self.random_crop:
+                i = randint(0, scale-1)
+                x = x[...,i:x.shape[-1]-scale+i]
+
             y = stft(x)
+
             if mel is not None:
                 y = mel(y)
             if self.magnitude:
@@ -297,13 +305,18 @@ class AudioDistanceV1(nn.Module):
         self.log_epsilon = log_epsilon
 
     def forward(self, x: torch.Tensor, y: torch.Tensor):
-        stfts_x = self.multiscale_stft(x)
-        stfts_y = self.multiscale_stft(y)
+        xy = torch.cat((x, y))
+        stfts_xy = self.multiscale_stft(xy)
+        # stfts_x = self.multiscale_stft(x)
+        # stfts_y = self.multiscale_stft(y)
         distance = 0.
 
-        for x, y in zip(stfts_x, stfts_y):
-            logx = torch.log(x + self.log_epsilon)
-            logy = torch.log(y + self.log_epsilon)
+        for xy in stfts_xy:
+            logx, logy = torch.log(xy + self.log_epsilon).chunk(2, 0)
+            x, y = xy.chunk(2, 0)
+        # for x, y in zip(stfts_x, stfts_y):
+        #     logx = torch.log(x + self.log_epsilon)
+        #     logy = torch.log(y + self.log_epsilon)
 
             lin_distance = mean_difference(x, y, norm='L2', relative=True)
             log_distance = mean_difference(logx, logy, norm='L1')

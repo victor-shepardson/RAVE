@@ -12,7 +12,8 @@ import numpy as np
 import requests
 import torch
 import yaml
-from scipy.signal import lfilter
+from scipy.stats import bernoulli
+from scipy.signal import lfilter, butter, sosfilt
 import resampy
 from torch.utils import data
 from tqdm import tqdm
@@ -22,6 +23,10 @@ from udls.generated import AudioExample
 
 class RandomSpeed(transforms.Transform):
     def __init__(self, semitones):
+        """place before RandomCrop, crop length must be sufficiently smaller than preprocessed length for given `semitones`
+        Args:
+            semitones: max transpose up and down
+        """
         self.semitones = semitones
     def __call__(self, x: np.ndarray):
         rate = 2 ** ((random()*2-1) * self.semitones / 12)
@@ -32,53 +37,97 @@ class RandomSpeed(transforms.Transform):
     
 class RandomGain(transforms.Transform):
     def __init__(self, db):
+        """
+        Args:
+            db: randomize gain from -db to db. upper bound will be clipped
+                to prevent peak > 1.
+        """
         self.db = db
     def __call__(self, x: np.ndarray):
         peak = np.max(np.abs(x))
-        max_db = min(self.db, np.log10(1/(peak+1e-5))*10)
-        min_db = -self.db
-        gain = 10 ** ((random()*(max_db-min_db)+min_db)/10)
+        max_db = min(self.db, np.log10(1/(peak+1e-5))*20)
+        # in case where peak is > 1, max_db is negative,
+        # min_db must be <= max_db
+        min_db = min(-self.db, max_db)
+        gain = 10 ** ((random()*(max_db-min_db)+min_db)/20)
         return x*gain
     
-# class AugmentEQ(transforms.Transform):
-#     def __init__(p_lp=0.8, p_bp=0.6, n_bp=2, p_ls=0.5):
-#         pass
-#     def __call__(x):
-#         if bernoulli.rvs(p_lp):
-#             f = 80 * 2 ** (8*np.random.rand())
-#             sos = butter(1, f, 'lp', fs=args.SR, output='sos')
-#             x = sosfilt(sos, x)
-#         if bernoulli.rvs(p_ls):
-#             f = 40 * 2 ** (4*np.random.rand())
-#             w = np.random.rand()**0.5
-#             sos = butter(1, f, 'lp', fs=args.SR, output='sos')
-#             x = x - w*sosfilt(sos, x)
-#         for _ in range(n_bp):
-#             if bernoulli.rvs(p_bp):
-#                 f = 160 * 2 ** (5*np.random.rand())
-#                 sos = butter(1, (f,f), 'bp', fs=args.SR, output='sos')
-#                 w = np.random.rand()*2-1
-#                 x = x + w*sosfilt(sos, x)
-#         return x
+class RandomEQ(transforms.Transform):
+    def __init__(self, sr, p_lp=0.75, p_bp=0.5, n_bp=2, p_ls=0.5):
+        """
+        Random parametric EQ roughly simulating electric guitar 
+        body+pickup resonances and tone control.
+        Args:
+            sr: audio sample rate
+            p_lp: probability of applying lowpass filter
+            p_bp: probability of applying each bandpass filter
+            n_pp: number of band filters
+            p_ls: probability of applying low shelf filter
+        """
+        self.sr = sr
+        self.p_lp = p_lp
+        self.p_bp = p_bp
+        self.n_bp = n_bp
+        self.p_ls = p_ls 
+    def __call__(self, x: np.ndarray):
+        if bernoulli.rvs(self.p_lp):
+            # low pass ~ 80-20k Hz
+            f = 80 * 2 ** (8*random())
+            sos = butter(1, f, 'lp', fs=self.sr, output='sos')
+            x = sosfilt(sos, x)
+        if bernoulli.rvs(self.p_ls):
+            # low shelf ~ 40-640 Hz
+            f = 40 * 2 ** (4*random())
+            # gain is distributed as 1-sqrt(u)
+            # median of about -11db, 95% about -32db
+            w = np.random.rand()**0.5
+            sos = butter(1, f, 'lp', fs=self.sr, output='sos')
+            x = x - w*sosfilt(sos, x)
+        for _ in range(self.n_bp):
+            if bernoulli.rvs(self.p_bp):
+                # band ~ 160-5k Hz
+                f = 160 * 2 ** (5*random())
+                sos = butter(1, (f*2/3,f*3/2), 'bp', fs=self.sr, output='sos')
+                # gain between 0 and 3
+                # i.e. minimum -inf (notch), median 0db, max 9.5db
+                w = np.random.rand()**2 * 4 - 1
+                x = x + w*sosfilt(sos, x)
+        return x
 
-# def AugmentDelay(max_delay=512):
-#     def fn(x):
-#         d = np.random.randint(1, max_delay)
-#         mix = (np.random.rand()*2-1)**3
-#         return x[:-d] + x[d:]*mix
-#     return fn
+class RandomDelay(transforms.Transform):
+    def __init__(self, max_delay:float=1024):
+        """
+        Random short comb-filtering delays.
+        place before RandomCrop.
+        Args:
+            max_delay: in samples. 
+            signal length must be <= preprocessing length - max_delay
+        """
+        self.max_delay = max_delay
+    def __call__(self, x: np.ndarray):
+        d = random() * (self.max_delay-1)
+        d_lo = int(d)+1
+        d_hi = d_lo+1
+        l = d - d_lo
+        delayed = x[1:-d_lo]*(1-l) + x[:-d_hi]*l
+        mix = (random()*2-1)**3
+        return x[d_hi:] + delayed*mix
 
-# def AugmentDistort(max_gain=32):
-#     eq = AugmentEQ(p_lp=0.7, p_bp=0.5, n_bp=3, p_ls=0.3)
-#     def fn(x):
-#         mix = np.random.rand()**2
-#         x_eq = eq(x)
-#         norm = min(1/np.max(np.abs(x_eq))/4, 32)
-#         gain = 1 + np.random.rand()**3 * (max_gain-1)
-#         # print(f'{mix=}, {gain=}')
-#         return np.tanh(x_eq*norm*gain)/norm * mix + x * (1-mix)
-#     return fn
-
+class RandomDistort(transforms.Transform):
+    def __init__(self, sr, max_drive=32, **kw):
+        """Random distortion (EQ+gain+tanh)"""
+        self.eq = RandomEQ(sr, **kw)
+        self.max_drive = max_drive
+    def __call__(self, x: np.ndarray):
+        mix = random()**2
+        x_eq = self.eq(x)
+        # normalize to peak at 1 before distortion
+        # (but max gain of 32 here)
+        norm = min(1/np.max(np.abs(x_eq)), 32)
+        # drive
+        drive = 1/4 + random()**3 * (self.max_drive-1/4)
+        # normalize back to original range and mix
+        return np.tanh(x_eq*norm*drive)/norm * mix + x * (1-mix)
 
 
 def get_derivator_integrator(sr: int):
@@ -244,6 +293,9 @@ def get_dataset(db_path,
                 speed_semitones: float = 0,
                 gain_db: float = 0,
                 allpass_p: float = 0.8,
+                eq_p: float = 0,
+                delay_p: float = 0,
+                distort_p: float = 0,
                 ):
     if db_path[:4] == "http":
         return HTTPAudioDataset(db_path=db_path)
@@ -256,14 +308,27 @@ def get_dataset(db_path,
     if speed_semitones:
         transform_list.append(RandomSpeed(speed_semitones))
 
-    transform_list.extend([
-        transforms.RandomCrop(n_signal),
-        transforms.RandomApply(
-            lambda x: random_phase_mangle(x, 20, 2000, .99, sr),
-            p=allpass_p,
-        ),
-        transforms.Dequantize(16),
-    ])
+    if delay_p:
+        transform_list.append(transforms.RandomApply(
+            RandomDelay(), p=delay_p))
+
+    transform_list.append(
+        transforms.RandomCrop(n_signal)
+    )
+
+    if eq_p:
+        transform_list.append(transforms.RandomApply(
+            RandomEQ(sr), p=eq_p))
+
+    if distort_p:
+        transform_list.append(transforms.RandomApply(
+            RandomDistort(sr), p=distort_p))
+
+    transform_list.append(transforms.RandomApply(
+        lambda x: random_phase_mangle(x, 20, 2000, .99, sr),
+        p=allpass_p))
+
+    transform_list.append(transforms.Dequantize(16))
 
     if normalize:
         transform_list.append(normalize_signal)

@@ -343,7 +343,8 @@ class RAVE(pl.LightningModule):
         p.tick('update loss gen dict')
 
         if reg.item():
-            loss_gen['regularization'] = reg * self.beta_factor
+            beta = self.beta_factor * 2048 / self.block_size
+            loss_gen['regularization'] = reg * beta
 
         if isinstance(self.encoder, blocks.VariationalEncoder):
             # log the KLD in bits/second

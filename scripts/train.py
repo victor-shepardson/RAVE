@@ -31,7 +31,7 @@ flags.DEFINE_integer('max_steps',
                      help='Maximum number of training steps')
 flags.DEFINE_integer('val_every', 10000, help='Checkpoint model every n steps')
 flags.DEFINE_integer('n_signal',
-                     131072,
+                     126976,
                      help='Number of audio samples to use during training')
 flags.DEFINE_integer('batch', 8, help='Batch size')
 flags.DEFINE_string('ckpt',
@@ -60,6 +60,15 @@ flags.DEFINE_float('gain_db',
 flags.DEFINE_float('allpass_p',
                   default=0.8,
                   help='chance of allpass filter data augmentation')
+flags.DEFINE_float('eq_p',
+                  default=0,
+                  help='chance of random EQ data augmentation')
+flags.DEFINE_float('delay_p',
+                  default=0,
+                  help='chance of random comb delay data augmentation')
+flags.DEFINE_float('distort_p',
+                  default=0,
+                  help='chance of random distortion data augmentation')
 flags.DEFINE_float('ema',
                    default=None,
                    help='Exponential weight averaging factor (optional)')
@@ -139,6 +148,9 @@ def main(argv):
                                        speed_semitones=FLAGS.speed_semitones,
                                        gain_db=FLAGS.gain_db,
                                        allpass_p=FLAGS.allpass_p,
+                                       eq_p=FLAGS.eq_p,
+                                       delay_p=FLAGS.delay_p,
+                                       distort_p=FLAGS.distort_p,
                                        )
     train, val = rave.dataset.split_dataset(dataset, 98)
     num_workers = FLAGS.workers

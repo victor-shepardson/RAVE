@@ -1,0 +1,11 @@
+from __gin__ import dynamic_registration
+
+import rave
+
+PHASE_1_DURATION = 0
+
+rave.BetaWarmupCallback:
+    warmup_len = 20000
+
+rave.RAVE:
+    freeze_encoder = False

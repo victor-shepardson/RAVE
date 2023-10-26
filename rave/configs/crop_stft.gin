@@ -1,0 +1,6 @@
+from __gin__ import dynamic_registration
+
+from rave import core
+
+core.MultiScaleSTFT:
+    random_crop = True

@@ -1,5 +1,9 @@
 from __gin__ import dynamic_registration
 
 import cached_conv as cc
+from rave import blocks
 
 cc.get_padding.mode = 'causal'
+
+blocks.GeneratorV2:
+    causal_convtranspose = True

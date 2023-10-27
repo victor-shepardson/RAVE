@@ -11,7 +11,7 @@ scipy==1.10.0
 torch==1.13.1
 tqdm>=4.64.1
 udls>=1.0.1
-cached-conv>=2.5.0
+cached-conv @ git+https://github.com/victor-shepardson/cached_conv@master
 nn-tilde>=1.5.2
 torchaudio
 tensorboard

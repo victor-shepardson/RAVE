@@ -624,6 +624,7 @@ class GeneratorV2(nn.Module):
         noise_module: Optional[NoiseGeneratorV2] = None,
         activation: Callable[[int], nn.Module] = lambda dim: nn.LeakyReLU(.2),
         adain: Optional[Callable[[int], nn.Module]] = None,
+        causal_convtranspose: bool = False,
     ) -> None:
         super().__init__()
         dilations_list = normalize_dilations(dilations, ratios)[::-1]
@@ -661,7 +662,8 @@ class GeneratorV2(nn.Module):
                 net.append(
                     normalization(cc.ConvTranspose1d(
                         num_channels, out_channels,
-                        2*r, stride=r, padding=r//2)))
+                        2*r, stride=r, padding=r//2,
+                        causal=causal_convtranspose)))
             else:
                 net.append(
                     normalization(cc.Conv1d(

@@ -14,6 +14,10 @@
 * transfer learning: option to initialize just weights from another checkpoint
 * export: option to specify exact number of latent dimensions (instead of fidelity)
 
+## Installation
+
+clone the git repo and run `RAVE_VERSION=2.3.0b CACHED_CONV_VERSION=2.6.0b pip install -e RAVE`
+
 ![rave_logo](docs/rave.png)
 
 # RAVE: Realtime Audio Variational autoEncoder

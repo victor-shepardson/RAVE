@@ -12,6 +12,7 @@
 * reduce default training window slightly (turns random cropping on by default)
 * option not to freeze encoder once warmed up
 * transfer learning: option to initialize just weights from another checkpoint
+* export: option to specify exact number of latent dimensions (instead of fidelity)
 
 ![rave_logo](docs/rave.png)
 

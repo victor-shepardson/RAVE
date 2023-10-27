@@ -1,3 +1,18 @@
+# Changes in this fork:
+* changes to cached_conv to reduce latency of `--causal` models by one block
+* log KLD measured in bits/second in tensorboard
+* scale beta (regularization parameter) appropriately with block size
+* add several data augmentation options
+    * RandomEQ (randomized parametric EQ)
+    * RandomDelay (randomized comb delay)
+    * RandomGain (randomize gain without peaking over 1)
+    * RandomSpeed (random resampling to different speeds)
+    * RandomDistort (random drive + dry mix tanh waveshaping)
+* add random cropping option to the spectral loss
+* reduce default training window slightly (turns random cropping on by default)
+* option not to freeze encoder once warmed up
+* transfer learning: option to initialize just weights from another checkpoint
+
 ![rave_logo](docs/rave.png)
 
 # RAVE: Realtime Audio Variational autoEncoder

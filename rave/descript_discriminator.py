@@ -28,7 +28,6 @@ def WNConv2d(*args, **kwargs):
 
 
 class MPD(nn.Module):
-
     def __init__(self, period):
         super().__init__()
         self.period = period

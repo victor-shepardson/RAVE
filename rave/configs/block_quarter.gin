@@ -1,0 +1,3 @@
+N_BAND = 8
+CAPACITY = 64
+RATIOS = [4,4,4,1]

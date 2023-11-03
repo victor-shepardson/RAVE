@@ -242,6 +242,13 @@ def main(argv):
     if transfer_run is not None:
         print(f'transferring weights from {transfer_run}')
         sd = torch.load(transfer_run, map_location='cpu')["state_dict"]
+        msd = model.state_dict()
+        for k in list(sd):
+            if k not in model.state_dict() or sd[k].shape != msd[k].shape:
+                print(f'skipping {k}')
+                sd.pop(k)
+
+
         model.load_state_dict(sd, strict=False)
 
     with open(os.path.join("runs", RUN_NAME, "config.gin"), "w") as config_out:

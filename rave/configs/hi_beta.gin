@@ -1,0 +1,7 @@
+from __gin__ import dynamic_registration
+
+import rave
+
+rave.BetaWarmupCallback:
+    initial_value = 1e-6
+    target_value = 2e-1

@@ -34,6 +34,8 @@ rave train --gpu XXX --config /XXX/organ_archive_b512_r48000/config.gin --config
 
 this would do transfer learning from the low latency (512 sample block) organ model.
 
+# --- original README follows below ---
+
 
 # RAVE: Realtime Audio Variational autoEncoder
 

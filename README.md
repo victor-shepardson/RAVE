@@ -20,6 +20,21 @@ clone the git repo and run `RAVE_VERSION=2.3.0b CACHED_CONV_VERSION=2.6.0b pip i
 
 ![rave_logo](docs/rave.png)
 
+## Transfer Learning
+
+See https://huggingface.co/Intelligent-Instruments-Lab/rave-models for pretrained checkpoints.
+
+To use transfer learning, you add 3 flags: `--transfer_ckpt /path/to/checkpoint/ --config /path/to/checkpoint/config.gin --config transfer` . make sure to use all 3. `transfer_ckpt` and the first config will generally be the same path (less the `config.gin` part).
+
+for example:
+
+```python
+rave train --gpu XXX --config /XXX/organ_archive_b512_r48000/config.gin --config lo_beta --config transfer --transfer_ckpt /XXX/organ_archive_b512_r48000 --db_path /data/users/XXX --name XXX 
+```
+
+this would do transfer learning from the low latency (512 sample block) organ model.
+
+
 # RAVE: Realtime Audio Variational autoEncoder
 
 Official implementation of _RAVE: A variational autoencoder for fast and high-quality neural audio synthesis_ ([article link](https://arxiv.org/abs/2111.05011)) by Antoine Caillon and Philippe Esling.

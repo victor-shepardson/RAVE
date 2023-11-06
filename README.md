@@ -29,7 +29,7 @@ To use transfer learning, you add 3 flags: `--transfer_ckpt /path/to/checkpoint/
 for example:
 
 ```python
-rave train --gpu XXX --config /XXX/organ_archive_b512_r48000/config.gin --config lo_beta --config transfer --transfer_ckpt /XXX/organ_archive_b512_r48000 --db_path /data/users/XXX --name XXX 
+rave train --gpu XXX --config XXX/rave-models/checkpoints/organ_archive_b512_r48000/config.gin --config transfer --config mid_beta  --transfer_ckpt XXX/rave-models/checkpoints/organ_archive_b512_r48000 --db_path XXX --name XXX 
 ```
 
 this would do transfer learning from the low latency (512 sample block) organ model.

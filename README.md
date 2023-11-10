@@ -18,7 +18,6 @@
 
 clone the git repo and run `RAVE_VERSION=2.3.0b CACHED_CONV_VERSION=2.6.0b pip install -e RAVE`
 
-![rave_logo](docs/rave.png)
 
 ## Transfer Learning
 
@@ -35,6 +34,7 @@ rave train --gpu XXX --config XXX/rave-models/checkpoints/organ_archive_b512_r48
 this would do transfer learning from the low latency (512 sample block) organ model. You can also add more configs; in the above example `--config mid_beta` is resetting the regularization strength (the pretrained model used a low beta value). You could also adjust the sample rate or do other non-architectural changes. make sure to add these after the first `--config` with the checkpoint path.
 
 # --- original README follows below ---
+![rave_logo](docs/rave.png)
 
 
 # RAVE: Realtime Audio Variational autoEncoder

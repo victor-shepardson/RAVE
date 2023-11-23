@@ -1,6 +1,9 @@
 # Changes in this fork:
 * changes to cached_conv to reduce latency of `--causal` models by one block
 * log KLD measured in bits/second in tensorboard
+* in audio logs, place the reconstruction before the original for less biased listening
+* trim audio logs to the valid portion
+* trim latent space to the valid portion when computing regularization loss
 * scale beta (regularization parameter) appropriately with block size
 * add several data augmentation options
     * RandomEQ (randomized parametric EQ)
@@ -35,7 +38,6 @@ this would do transfer learning from the low latency (512 sample block) organ mo
 
 # --- original README follows below ---
 ![rave_logo](docs/rave.png)
-
 
 # RAVE: Realtime Audio Variational autoEncoder
 

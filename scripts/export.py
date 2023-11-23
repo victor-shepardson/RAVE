@@ -202,11 +202,11 @@ class ScriptedRAVE(nn_tilde.Module):
         self.reset_target = False,
 
     @torch.jit.export
-    def encode(self, x):
-        return self.encode_dist(x)[0]
+    def encode(self, x, temp:float=1.0):
+        return self.encode_dist(x, temp)[0]
     
     @torch.jit.export
-    def encode_dist(self, x):
+    def encode_dist(self, x, temp:float=1.0):
         "return sample, params"
         if self.is_using_adain:
             self.update_adain()
@@ -218,7 +218,7 @@ class ScriptedRAVE(nn_tilde.Module):
             x = self.pqmf(x)
 
         h = self.encoder(x)
-        return self.post_process_latent(h)
+        return self.post_process_latent(h, temp)
 
     @torch.jit.export
     def decode(self, z, from_forward: bool = False):
@@ -243,7 +243,7 @@ class ScriptedRAVE(nn_tilde.Module):
         return y
 
     def forward(self, x):
-        return self.decode(self.encode(x), from_forward=True)
+        return self.decode(self.encode(x, temp=1.0), from_forward=True)
 
     @torch.jit.export
     def get_learn_target(self) -> bool:
@@ -284,14 +284,14 @@ class ScriptedRAVE(nn_tilde.Module):
 
 class VariationalScriptedRAVE(ScriptedRAVE):
 
-    def post_process_latent(self, h):
+    def post_process_latent(self, h, temp:float=1.0):
         z, std = self.encoder.params(h)
         z = z - self.latent_mean.unsqueeze(-1)
         z = F.conv1d(z, self.latent_pca.unsqueeze(-1))
         z = z[:, :self.latent_size]
         std = F.conv1d(std*std, self.latent_pca.unsqueeze(-1).pow(2)).sqrt()
         std = std[:, :self.latent_size]
-        return self.encoder.rsample(z, std), (z, std)
+        return self.encoder.rsample(z, std*temp), (z, std)
 
     def pre_process_latent(self, z):
         noise = torch.randn(
@@ -315,7 +315,7 @@ class VariationalScriptedRAVE(ScriptedRAVE):
 
 class DiscreteScriptedRAVE(ScriptedRAVE):
 
-    def post_process_latent(self, z):
+    def post_process_latent(self, z, temp:float=0.0):
         z = self.encoder.rvq.encode(z)
         return z.float(), None
 
@@ -332,7 +332,7 @@ class DiscreteScriptedRAVE(ScriptedRAVE):
 
 class WasserteinScriptedRAVE(ScriptedRAVE):
 
-    def post_process_latent(self, z):
+    def post_process_latent(self, z, temp:float=0.0):
         return z, None
 
     def pre_process_latent(self, z):
@@ -345,7 +345,7 @@ class WasserteinScriptedRAVE(ScriptedRAVE):
 
 class SphericalScriptedRAVE(ScriptedRAVE):
 
-    def post_process_latent(self, z):
+    def post_process_latent(self, z, temp:float=0.0):
         return rave.blocks.unit_norm_vector_to_angles(z), None
 
     def pre_process_latent(self, z):

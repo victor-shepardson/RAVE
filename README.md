@@ -18,6 +18,7 @@
 * export: option to specify exact number of latent dimensions (instead of fidelity)
 * export: add an optional temperature parameter to `encode` (only works for VAE models)
 * export: also export an `encode_dist` function which returns both a sample from and parameters of the posterior (only works for VAE models)
+* add random seed option to train.py
 
 ## Installation
 

@@ -8,12 +8,21 @@ import numpy as np
 import gin
 import pytorch_lightning as pl
 import torch
-from absl import flags
+from absl import flags, app
 from torch.utils.data import DataLoader
+
+try:
+    import rave
+except:
+    import sys, os 
+    sys.path.append(os.path.abspath('.'))
+    import rave
 
 import rave
 import rave.core
 import rave.dataset
+from rave.transforms import get_augmentations, add_augmentation
+
 
 # fix torch device order to be same as nvidia-smi order
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -24,17 +33,27 @@ flags.DEFINE_string('name', None, help='Name of the run', required=True)
 flags.DEFINE_multi_string('config',
                           default='v2.gin',
                           help='RAVE configuration to use')
+flags.DEFINE_multi_string('augment',
+                           default = [],
+                            help = 'augmentation configurations to use')
 flags.DEFINE_string('db_path',
                     None,
                     help='Preprocessed dataset path',
                     required=True)
+flags.DEFINE_string('out_path',
+                    default="runs/",
+                    help='Output folder')
 flags.DEFINE_integer('max_steps',
                      6000000,
                      help='Maximum number of training steps')
 flags.DEFINE_integer('val_every', 10000, help='Checkpoint model every n steps')
+flags.DEFINE_integer('save_every',
+                     500000,
+                     help='save every n steps (default: just last)')
 flags.DEFINE_integer('n_signal',
                      126976,
                      help='Number of audio samples to use during training')
+flags.DEFINE_integer('channels', 0, help="number of audio channels")
 flags.DEFINE_integer('batch', 8, help='Batch size')
 flags.DEFINE_string('ckpt',
                     None,
@@ -56,28 +75,34 @@ flags.DEFINE_bool('normalize',
                   help='Train RAVE on normalized signals')
 flags.DEFINE_float('speed_semitones',
                   default=0,
-                  help='speed change data augmentation')
+                  help='[vs fork] speed change data augmentation')
 flags.DEFINE_float('gain_db',
                   default=0,
-                  help='gain change data augmentation')
+                  help='[vs fork] gain change data augmentation')
 flags.DEFINE_float('allpass_p',
                   default=0.8,
-                  help='chance of allpass filter data augmentation')
+                  help='[vs fork] chance of allpass filter data augmentation')
 flags.DEFINE_float('eq_p',
                   default=0,
-                  help='chance of random EQ data augmentation')
+                  help='[vs fork] chance of random EQ data augmentation')
 flags.DEFINE_float('delay_p',
                   default=0,
-                  help='chance of random comb delay data augmentation')
+                  help='[vs fork] chance of random comb delay data augmentation')
 flags.DEFINE_float('distort_p',
                   default=0,
-                  help='chance of random distortion data augmentation')
+                  help='[vs fork] chance of random distortion data augmentation')
+flags.DEFINE_list('rand_pitch',
+                  default=None,
+                  help='activates random pitch')
 flags.DEFINE_float('ema',
                    default=None,
                    help='Exponential weight averaging factor (optional)')
 flags.DEFINE_bool('progress',
                   default=True,
                   help='Display training progress bar')
+flags.DEFINE_bool('smoke_test', 
+                  default=False,
+                  help="Run training with n_batches=1 to test the model")
 
 
 class EMA(pl.Callback):
@@ -121,12 +146,17 @@ class EMA(pl.Callback):
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         self.weights.update(state_dict)
 
-
 def add_gin_extension(config_name: str) -> str:
     if config_name[-4:] != '.gin':
         config_name += '.gin'
     return config_name
 
+def parse_augmentations(augmentations):
+    for a in augmentations:
+        gin.parse_config_file(a)
+        add_augmentation()
+        gin.clear_config()
+    return get_augmentations()
 
 def main(argv):
     random.seed(FLAGS.seed)
@@ -135,18 +165,33 @@ def main(argv):
 
     torch.set_float32_matmul_precision('high')
     torch.backends.cudnn.benchmark = True
-    gin.parse_config_files_and_bindings(
-        map(add_gin_extension, FLAGS.config),
-        FLAGS.override,
-    )
 
-    model = rave.RAVE()
+    # check dataset channels
+    n_channels = rave.dataset.get_training_channels(FLAGS.db_path, FLAGS.channels)
+    gin.bind_parameter('RAVE.n_channels', n_channels)
 
-    print(model)
+    # parse augmentations
+    augmentations = parse_augmentations(map(add_gin_extension, FLAGS.augment))
+    gin.bind_parameter('dataset.get_dataset.augmentations', augmentations)
 
+    # parse configuration
+    if FLAGS.ckpt:
+        config_file = rave.core.search_for_config(FLAGS.ckpt)
+        if config_file is None:
+            print('Config file not found in %s'%FLAGS.run)
+        gin.parse_config_file(config_file)
+    else:
+        gin.parse_config_files_and_bindings(
+            map(add_gin_extension, FLAGS.config),
+            FLAGS.override,
+        )
+
+    # create model
+    model = rave.RAVE(n_channels=FLAGS.channels)
     if FLAGS.derivative:
         model.integrator = rave.dataset.get_derivator_integrator(model.sr)[1]
 
+    # parse datasset
     dataset = rave.dataset.get_dataset(FLAGS.db_path,
                                        model.sr,
                                        FLAGS.n_signal,
@@ -158,13 +203,14 @@ def main(argv):
                                        eq_p=FLAGS.eq_p,
                                        delay_p=FLAGS.delay_p,
                                        distort_p=FLAGS.distort_p,
-                                       )
+                                       rand_pitch=FLAGS.rand_pitch,
+                                       n_channels=n_channels)
     train, val = rave.dataset.split_dataset(dataset, 98)
-    num_workers = FLAGS.workers
 
+    # get data-loader
+    num_workers = FLAGS.workers
     if os.name == "nt" or sys.platform == "darwin":
         num_workers = 0
-
     train = DataLoader(train,
                        FLAGS.batch,
                        True,
@@ -175,21 +221,26 @@ def main(argv):
     # CHECKPOINT CALLBACKS
     validation_checkpoint = pl.callbacks.ModelCheckpoint(monitor="validation",
                                                          filename="best")
-    last_checkpoint = pl.callbacks.ModelCheckpoint(filename="last")
+    last_filename = "last" if FLAGS.save_every is None else "epoch-{epoch:04d}"                                                        
+    last_checkpoint = rave.core.ModelCheckpoint(filename=last_filename, step_period=FLAGS.save_every)
 
     val_check = {}
     if len(train) >= FLAGS.val_every:
-        val_check["val_check_interval"] = FLAGS.val_every
+        val_check["val_check_interval"] = 1 if FLAGS.smoke_test else FLAGS.val_every
     else:
         nepoch = FLAGS.val_every // len(train)
         val_check["check_val_every_n_epoch"] = nepoch
+
+    if FLAGS.smoke_test:
+        val_check['limit_train_batches'] = 1
+        val_check['limit_val_batches'] = 1
 
     gin_hash = hashlib.md5(
         gin.operative_config_str().encode()).hexdigest()[:10]
 
     RUN_NAME = f'{FLAGS.name}_{gin_hash}'
 
-    os.makedirs(os.path.join("runs", RUN_NAME), exist_ok=True)
+    os.makedirs(os.path.join(FLAGS.out_path, RUN_NAME), exist_ok=True)
 
     if FLAGS.gpu == [-1]:
         gpu = 0
@@ -218,7 +269,7 @@ def main(argv):
         last_checkpoint,
         rave.model.WarmupCallback(),
         rave.model.QuantizeCallback(),
-        rave.core.LoggerCallback(rave.core.ProgressLogger(RUN_NAME)),
+        # rave.core.LoggerCallback(rave.core.ProgressLogger(RUN_NAME)),
         rave.model.BetaWarmupCallback(),
     ]
 
@@ -227,13 +278,13 @@ def main(argv):
 
     trainer = pl.Trainer(
         logger=pl.loggers.TensorBoardLogger(
-            "runs",
+            FLAGS.out_path,
             name=RUN_NAME,
         ),
         accelerator=accelerator,
         devices=devices,
         callbacks=callbacks,
-        max_epochs=100000,
+        max_epochs=300000,
         max_steps=FLAGS.max_steps,
         profiler="simple",
         enable_progress_bar=FLAGS.progress,
@@ -242,8 +293,10 @@ def main(argv):
 
     run = rave.core.search_for_run(FLAGS.ckpt)
     if run is not None:
-        step = torch.load(run, map_location='cpu')["global_step"]
-        trainer.fit_loop.epoch_loop._batches_that_stepped = step
+        print('loading state from file %s'%run)
+        loaded = torch.load(run, map_location='cpu')
+        trainer.fit_loop.epoch_loop._batches_that_stepped = loaded['global_step']
+        # model.load_state_dict(loaded['state_dict'])
 
     transfer_run = rave.core.search_for_run(FLAGS.transfer_ckpt)
     if transfer_run is not None:
@@ -254,11 +307,13 @@ def main(argv):
             if k not in model.state_dict() or sd[k].shape != msd[k].shape:
                 print(f'skipping {k}')
                 sd.pop(k)
-
-
         model.load_state_dict(sd, strict=False)
 
-    with open(os.path.join("runs", RUN_NAME, "config.gin"), "w") as config_out:
+    with open(os.path.join(FLAGS.out_path, RUN_NAME, "config.gin"), "w") as config_out:
         config_out.write(gin.operative_config_str())
 
     trainer.fit(model, train, val, ckpt_path=run)
+
+
+if __name__ == "__main__": 
+    app.run(main)

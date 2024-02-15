@@ -250,13 +250,15 @@ class NoiseGeneratorV2(nn.Module):
         data_size: int,
         ratios: int,
         noise_bands: int,
+        n_channels: int = 1,
         activation: Callable[[int], nn.Module] = lambda dim: nn.LeakyReLU(.2),
     ):
         super().__init__()
         net = []
+        self.n_channels = n_channels
         channels = [in_size]
         channels.extend((len(ratios) - 1) * [hidden_size])
-        channels.append(data_size * noise_bands)
+        channels.append(data_size * noise_bands * n_channels)
 
         for i, r in enumerate(ratios):
             net.append(
@@ -281,7 +283,7 @@ class NoiseGeneratorV2(nn.Module):
     def forward(self, x):
         amp = mod_sigmoid(self.net(x) - 5)
         amp = amp.permute(0, 2, 1)
-        amp = amp.reshape(amp.shape[0], amp.shape[1], self.data_size, -1)
+        amp = amp.reshape(amp.shape[0], amp.shape[1], self.n_channels * self.data_size, -1)
 
         ir = amp_to_impulse_response(amp, self.target_size)
         noise = torch.rand_like(ir) * 2 - 1
@@ -328,6 +330,7 @@ class Generator(nn.Module):
         ratios,
         loud_stride,
         use_noise,
+        n_channels: int = 1,
         recurrent_layer: Optional[Callable[[], nn.Module]] = None,
     ):
         super().__init__()
@@ -366,7 +369,7 @@ class Generator(nn.Module):
         self.net = cc.CachedSequential(*net)
 
         wave_gen = normalization(
-            cc.Conv1d(out_dim, data_size, 7, padding=cc.get_padding(7)))
+            cc.Conv1d(out_dim, data_size * n_channels, 7, padding=cc.get_padding(7)))
 
         loud_gen = normalization(
             cc.Conv1d(
@@ -380,7 +383,7 @@ class Generator(nn.Module):
         branches = [wave_gen, loud_gen]
 
         if use_noise:
-            noise_gen = NoiseGenerator(out_dim, data_size)
+            noise_gen = NoiseGenerator(out_dim, data_size * n_channels)
             branches.append(noise_gen)
 
         self.synth = cc.AlignBranches(
@@ -430,10 +433,14 @@ class Encoder(nn.Module):
         n_out,
         sample_norm,
         repeat_layers,
+        n_channels: int = 1,
         recurrent_layer: Optional[Callable[[], nn.Module]] = None,
+        # retro-compatiblity
+        spectrogram = None
     ):
         super().__init__()
-        net = [cc.Conv1d(data_size, capacity, 7, padding=cc.get_padding(7))]
+        data_size = data_size or n_channels
+        net = [cc.Conv1d(data_size * n_channels, capacity, 7, padding=cc.get_padding(7))]
 
         for i, r in enumerate(ratios):
             in_dim = 2**i * capacity
@@ -509,7 +516,7 @@ class EncoderV2(nn.Module):
 
     def __init__(
         self,
-        data_size: int,
+        data_size: Union[int, None],
         capacity: int,
         ratios: Sequence[int],
         latent_size: int,
@@ -518,26 +525,22 @@ class EncoderV2(nn.Module):
         dilations: Sequence[int],
         keep_dim: bool = False,
         recurrent_layer: Optional[Callable[[], nn.Module]] = None,
-        spectrogram: Optional[Callable[[], Spectrogram]] = None,
+        n_channels: int = 1,
         activation: Callable[[int], nn.Module] = lambda dim: nn.LeakyReLU(.2),
         adain: Optional[Callable[[int], nn.Module]] = None,
-        # prior_init:bool = False,
+        spectrogram = None
     ) -> None:
         super().__init__()
         dilations_list = normalize_dilations(dilations, ratios)
+        data_size = data_size or n_channels
 
         # store this for computing block_size
         self.downsample_factor = math.prod(ratios)
 
-        if spectrogram is not None:
-            self.spectrogram = spectrogram()
-        else:
-            self.spectrogram = None
-
         net = [
             normalization(
                 cc.Conv1d(
-                    data_size,
+                    data_size * n_channels,
                     capacity,
                     kernel_size=kernel_size * 2 + 1,
                     padding=cc.get_padding(kernel_size * 2 + 1),
@@ -600,10 +603,6 @@ class EncoderV2(nn.Module):
         self.net = cc.CachedSequential(*net)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.spectrogram is not None:
-            x = self.spectrogram(x[:, 0])[..., :-1]
-            x = torch.log1p(x)
-
         x = self.net(x)
         return x
 
@@ -612,14 +611,15 @@ class GeneratorV2(nn.Module):
 
     def __init__(
         self,
-        data_size: int,
         capacity: int,
         ratios: Sequence[int],
         latent_size: int,
         kernel_size: int,
         dilations: Sequence[int],
         keep_dim: bool = False,
+        data_size: Union[int, None] = None,
         recurrent_layer: Optional[Callable[[], nn.Module]] = None,
+        n_channels: int = 1,
         amplitude_modulation: bool = False,
         noise_module: Optional[NoiseGeneratorV2] = None,
         activation: Callable[[int], nn.Module] = lambda dim: nn.LeakyReLU(.2),
@@ -627,6 +627,10 @@ class GeneratorV2(nn.Module):
         causal_convtranspose: bool = False,
     ) -> None:
         super().__init__()
+        if data_size is None:
+            data_size = n_channels
+        else:
+            data_size = data_size * n_channels 
         dilations_list = normalize_dilations(dilations, ratios)[::-1]
         ratios = ratios[::-1]
 
@@ -699,7 +703,7 @@ class GeneratorV2(nn.Module):
 
         if noise_module is not None:
             self.waveform_module = waveform_module
-            self.noise_module = noise_module(out_channels)
+            self.noise_module = noise_module(out_channels, n_channels = n_channels)
         else:
             net.append(waveform_module)
 
@@ -730,9 +734,10 @@ class GeneratorV2(nn.Module):
 
 class VariationalEncoder(nn.Module):
 
-    def __init__(self, encoder):
+    def __init__(self, encoder, beta: float = 1.0, n_channels=1):
         super().__init__()
-        self.encoder = encoder()
+        self.encoder = encoder(n_channels=n_channels)
+        self.beta = beta
         self.register_buffer("warmed_up", torch.tensor(0))
 
     def params(self, z):
@@ -758,7 +763,7 @@ class VariationalEncoder(nn.Module):
         logvar = torch.log(var)
         kl = (mean * mean + var - logvar - 1)
 
-        return z, kl
+        return z, self.beta * kl
 
     def set_warmed_up(self, state: bool):
         state = torch.tensor(int(state), device=self.warmed_up.device)
@@ -778,9 +783,10 @@ class WasserteinEncoder(nn.Module):
         self,
         encoder_cls,
         noise_augmentation: int = 0,
+        n_channels: int = 1
     ):
         super().__init__()
-        self.encoder = encoder_cls()
+        self.encoder = encoder_cls(n_channels=n_channels)
         self.register_buffer("warmed_up", torch.tensor(0))
         self.noise_augmentation = noise_augmentation
 
@@ -823,9 +829,10 @@ class DiscreteEncoder(nn.Module):
                  encoder_cls,
                  vq_cls,
                  num_quantizers,
-                 noise_augmentation: int = 0):
+                 noise_augmentation: int = 0,
+                 n_channels: int = 1):
         super().__init__()
-        self.encoder = encoder_cls()
+        self.encoder = encoder_cls(n_channels=n_channels)
         self.rvq = vq_cls()
         self.num_quantizers = num_quantizers
         self.register_buffer("warmed_up", torch.tensor(0))
@@ -857,9 +864,9 @@ class DiscreteEncoder(nn.Module):
 
 class SphericalEncoder(nn.Module):
 
-    def __init__(self, encoder_cls: Callable[[], nn.Module]) -> None:
+    def __init__(self, encoder_cls: Callable[[], nn.Module], n_channels: int = 1) -> None:
         super().__init__()
-        self.encoder = encoder_cls()
+        self.encoder = encoder_cls(n_channels=n_channels)
 
     def reparametrize(self, z):
         norm_z = z / torch.norm(z, p=2, dim=1, keepdim=True)

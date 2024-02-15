@@ -3,7 +3,7 @@ import sys
 from absl import app
 
 AVAILABLE_SCRIPTS = [
-    'preprocess', 'train', 'export', 'export_onnx', 'remote_dataset'
+    'preprocess', 'train', 'export', 'export_onnx', 'remote_dataset', 'adapt'
 ]
 
 
@@ -32,6 +32,10 @@ def main():
         from scripts import export
         sys.argv[0] = export.__name__
         app.run(export.main)
+    elif command == 'adapt':
+        from scripts import adapt
+        sys.argv[0] = adapt.__name__
+        app.run(adapt.main)
     elif command == 'preprocess':
         from scripts import preprocess
         sys.argv[0] = preprocess.__name__

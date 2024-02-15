@@ -45,6 +45,10 @@ flags.DEFINE_bool(
     'stereo',
     default=False,
     help='Enable fake stereo mode (one encoding, double decoding')
+flags.DEFINE_bool(
+    'normalize_signs',
+    default=False,
+    help='Enable fake stereo mode (one encoding, double decoding')
 flags.DEFINE_bool('ema_weights',
                   default=False,
                   help='Use ema weights if available')
@@ -60,7 +64,9 @@ class ScriptedRAVE(nn_tilde.Module):
                  stereo: bool,
                  fidelity: float = .95,
                  latent_size: int = None,
-                 target_sr: bool = None) -> None:
+                 target_sr: bool = None,
+                 normalize_signs: bool = False,
+                 ) -> None:
         super().__init__()
         self.stereo = stereo
 
@@ -79,6 +85,7 @@ class ScriptedRAVE(nn_tilde.Module):
                 self.sr = target_sr
 
         self.full_latent_size = pretrained.latent_size
+
 
         self.is_using_adain = False
         for m in self.modules():
@@ -118,6 +125,8 @@ class ScriptedRAVE(nn_tilde.Module):
             raise ValueError(
                 f'Encoder type {pretrained.encoder.__class__.__name__} not supported'
             )
+        
+        self.register_buffer('signs', torch.ones(self.latent_size))
 
         x_len = 2**14
         x = torch.zeros(1, 1, x_len)
@@ -134,6 +143,26 @@ class ScriptedRAVE(nn_tilde.Module):
         channels = ["(L)", "(R)"] if stereo else ["(mono)"]
 
         self.fake_adain = rave.blocks.AdaptiveInstanceNormalization(0)
+
+        if normalize_signs:
+            #### in-context latents
+            # get random batch of latents
+            bs = 64
+            zs = 2*self.sr//ratio_encode
+            z = torch.randn(
+                zs*bs, self.latent_size,
+                generator=torch.Generator().manual_seed(999))
+            # decode
+            z_t = z.reshape(zs, bs, self.latent_size).permute(1,2,0)
+            x = self.decode(z_t)
+            # stack blocks along batch dim
+            x = torch.cat(x.split(ratio_encode, -1))
+            # measure audio features
+            w = x.diff(dim=-1).pow(2).sum(-1).sqrt()
+            # correlate with latents
+            # set signs
+            self.signs[:] = (w * z).sum(0).sign()
+            print(self.signs)
 
         self.register_method(
             "encode",
@@ -289,6 +318,7 @@ class VariationalScriptedRAVE(ScriptedRAVE):
         z = z - self.latent_mean.unsqueeze(-1)
         z = F.conv1d(z, self.latent_pca.unsqueeze(-1))
         z = z[:, :self.latent_size]
+        z = z * self.signs[:,None]
         std = F.conv1d(std*std, self.latent_pca.unsqueeze(-1).pow(2)).sqrt()
         std = std[:, :self.latent_size]
         return self.encoder.rsample(z, std*temp), (z, std)
@@ -307,6 +337,7 @@ class VariationalScriptedRAVE(ScriptedRAVE):
         #   ).sqrt()[:, self.latent_size:]
         # noise = pca_noise_std * torch.randn_like(pca_noise_std)
 
+        z = z * self.signs[:,None]
         z = torch.cat([z, noise], 1)
         z = F.conv1d(z, self.latent_pca.T.unsqueeze(-1))
         z = z + self.latent_mean.unsqueeze(-1)
@@ -409,6 +440,7 @@ def main(argv):
         fidelity=FLAGS.fidelity,
         latent_size=FLAGS.latent_size,
         target_sr=FLAGS.sr,
+        normalize_signs=FLAGS.normalize_signs
     )
 
     logging.info("save model")
@@ -417,6 +449,8 @@ def main(argv):
         model_name += "_streaming"
     if FLAGS.stereo:
         model_name += "_stereo"
+    if FLAGS.normalize_signs:
+        model_name += "_norm"
     model_name += ".ts"
 
     scripted_rave.export_to_ts(os.path.join(FLAGS.run, model_name))

@@ -1,4 +1,9 @@
+last merged upstream at v2.3.1 (multichannel)
+
 # Changes in this fork:
+* also log mono mix of audio to tensorboard for multichannel models
+* new `rave adapt` script for fitting linear adapters between different models
+* sign normalization at export (flip polarity of latents to generally correlate with loudness/brightness)
 * changes to cached_conv to reduce latency of `--causal` models by one block
 * log KLD measured in bits/second in tensorboard
 * in audio logs, place the reconstruction before the original for less biased listening

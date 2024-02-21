@@ -561,11 +561,20 @@ class RAVE(pl.LightningModule):
                     np.argmax(var > p).astype(np.float32),
                 )
 
-        y = torch.cat(audio, 0)[:8].reshape(-1).numpy()
+        y = torch.cat(audio, 0)[:8]
+        if self.n_channels > 1:
+            ym = y.mean(-2).reshape(-1).numpy()
+            if self.integrator is not None:
+                ym = self.integrator(ym)
+            self.logger.experiment.add_audio(
+                "audio_val_mix", ym, self.eval_number, self.sr)
+
+        y = y.reshape(-1).numpy()
         if self.integrator is not None:
             y = self.integrator(y)
         self.logger.experiment.add_audio("audio_val", y, self.eval_number,
                                         self.sr)
+            
         self.eval_number += 1
 
     def on_fit_start(self):

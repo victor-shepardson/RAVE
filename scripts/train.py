@@ -66,7 +66,7 @@ flags.DEFINE_integer('workers',
                      default=8,
                      help='Number of workers to spawn for dataset loading')
 flags.DEFINE_multi_integer('gpu', default=None, help='GPU to use')
-flags.DEFINE_integer('[vs fork] seed', 0, help='random seed')
+flags.DEFINE_integer('seed', 0, help='[vs fork] random seed')
 flags.DEFINE_bool('derivative',
                   default=False,
                   help='Train RAVE on the derivative of the signal')

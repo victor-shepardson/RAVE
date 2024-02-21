@@ -27,7 +27,7 @@ last merged upstream at v2.3.1 (multichannel)
 
 ## Installation
 
-clone the git repo and run `RAVE_VERSION=2.3.0b CACHED_CONV_VERSION=2.6.0b pip install -e RAVE`
+clone the git repo and run `RAVE_VERSION=2.4.0b CACHED_CONV_VERSION=2.6.0b pip install -e RAVE`
 
 
 ## Transfer Learning

@@ -53,7 +53,7 @@ flags.DEFINE_integer(
     help='alternative to `fidelity` (Variational mode only)')
 flags.DEFINE_bool(
     'normalize_signs',
-    default=False,
+    default=True,
     help='Enable fake stereo mode (one encoding, double decoding')
 flags.DEFINE_string('name', 
                      default= None,
@@ -165,26 +165,6 @@ class ScriptedRAVE(nn_tilde.Module):
 
         encode_shape = (pretrained.n_channels, 2**14) 
 
-        if normalize_signs:
-            #### in-context latents
-            # get random batch of latents
-            bs = 64
-            zs = 2*self.sr//ratio_encode
-            z = torch.randn(
-                zs*bs, self.latent_size,
-                generator=torch.Generator().manual_seed(999))
-            # decode
-            z_t = z.reshape(zs, bs, self.latent_size).permute(1,2,0)
-            x = self.decode(z_t)
-            # stack blocks along batch dim
-            x = torch.cat(x.split(ratio_encode, -1))
-            # measure audio features
-            w = x.diff(dim=-1).pow(2).sum(-1).sqrt()
-            # correlate with latents
-            # set signs
-            self.signs[:] = (w * z).sum(0).sign()
-            print(self.signs)
-
         self.register_method(
             "encode",
             in_channels=self.n_channels,
@@ -219,6 +199,32 @@ class ScriptedRAVE(nn_tilde.Module):
             input_labels=['(signal) Channel %d'%d for d in range(1, self.n_channels + 1)],
             output_labels=['(signal) Channel %d'%d for d in range(1, self.target_channels+1)]
         )
+
+        if normalize_signs:
+            logging.info('[vs fork] Normalizing latent signs')
+            # get random batch of latents
+            bs = 8
+            if self.n_channels * bs > cc.MAX_BATCH_SIZE:
+                logging.warn('warning: may need to increase cachedconv.MAX_BATCH_SIZE')
+            zs = 32*self.sr//ratio_encode
+            z = torch.randn(
+                zs*bs, self.latent_size,
+                generator=torch.Generator().manual_seed(999))
+            # decode
+            z_t = z.reshape(zs, bs, self.latent_size).permute(1,2,0)
+            x = self.decode(z_t)
+            # stack blocks along batch dim
+            x = torch.cat(x.split(ratio_encode, -1))
+            # measure audio features
+            w = x.diff(dim=-1).pow(2).sum(-1).sqrt()
+            # weight toward higher numbered channels if multichannel
+            w = w*torch.linspace(0.25,1,w.shape[1])[None]
+            w = w.sum(1, keepdim=True)
+            # correlate with latents
+            # set signs
+            w = w - w.mean()
+            self.signs[:] = (w * z).sum(0).sign()
+            logging.info(f'flipped latent dims: {self.signs}')
 
         # init prior in case
         self._has_prior = False
@@ -547,7 +553,7 @@ def main(argv):
     gin.parse_config_file(config_file)
     FLAGS.run = rave.core.search_for_run(FLAGS.run)
 
-    logging.info(checkpoint)
+    logging.info(FLAGS.run)
 
     pretrained = rave.RAVE()
     if FLAGS.run is not None:

@@ -197,7 +197,8 @@ def get_rave_receptive_field(model, n_channels=1):
         y[0, 0, N // 2].backward()
         assert x.grad is not None, "input has no grad"
 
-        grad = x.grad.data.reshape(-1)
+        # grad = x.grad.data.reshape(-1)
+        grad = x.grad[0,0].data.reshape(-1)
         left_grad, right_grad = grad.chunk(2, 0)
         large_enough = (left_grad[0] == 0) and right_grad[-1] == 0
         if large_enough:

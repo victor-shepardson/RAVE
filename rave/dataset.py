@@ -334,6 +334,7 @@ def get_dataset(db_path,
         metadata = yaml.safe_load(metadata)
 
     sr_dataset = metadata.get('sr', 44100)
+    print(f'{sr=}, {sr_dataset=}')
     lazy = metadata['lazy']
 
     transform_list = [lambda x: x.astype(np.float32)]

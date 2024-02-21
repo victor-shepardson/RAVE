@@ -60,13 +60,13 @@ flags.DEFINE_string('ckpt',
                     help='Path to checkpoint to continue training from')
 flags.DEFINE_string('transfer_ckpt',
                     None,
-                    help='Path to checkpoint to initialize weights from')
+                    help='[vs fork] Path to checkpoint to initialize weights from')
 flags.DEFINE_multi_string('override', default=[], help='Override gin binding')
 flags.DEFINE_integer('workers',
                      default=8,
                      help='Number of workers to spawn for dataset loading')
 flags.DEFINE_multi_integer('gpu', default=None, help='GPU to use')
-flags.DEFINE_integer('seed', 0, help='random seed')
+flags.DEFINE_integer('[vs fork] seed', 0, help='random seed')
 flags.DEFINE_bool('derivative',
                   default=False,
                   help='Train RAVE on the derivative of the signal')
@@ -187,7 +187,7 @@ def main(argv):
         )
 
     # create model
-    model = rave.RAVE(n_channels=FLAGS.channels)
+    model = rave.RAVE()
     if FLAGS.derivative:
         model.integrator = rave.dataset.get_derivator_integrator(model.sr)[1]
 

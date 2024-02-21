@@ -472,27 +472,6 @@ class RAVE(pl.LightningModule):
         self.log_dict(loss_gen)
         p.tick('logging')
 
-    ##### old non-jit encode / encode_dist / decode / forward
-    ##### can probably delete
-    # def encode(self, x):
-    #     if self.pqmf is not None:
-    #         x = self.pqmf(x)
-    #     z, = self.encoder.reparametrize(self.encoder(x))[:1]
-    #     return z
-    
-    # def encode_dist(self, x):
-    #     if self.pqmf is not None:
-    #         x = self.pqmf(x)
-    #     return self.encoder.params(self.encoder(x))
-
-    # def decode(self, z):
-    #     y = self.decoder(z)
-    #     if self.pqmf is not None:
-    #         y = self.pqmf.inverse(y)
-    #     return y
-
-    # def forward(self, x):
-    #     return self.decode(self.encode(x))
     def validation_step(self, x, batch_idx):
 
         z, x_multiband = self.encode(x, return_mb=True)
@@ -518,7 +497,7 @@ class RAVE(pl.LightningModule):
             y = _pqmf_decode(
                 self.pqmf, y, 
                 batch_size=batch_size, n_channels=self.n_channels)            
-
+        
         distance = self.audio_distance(x, y)
         full_distance = sum(distance.values())
 

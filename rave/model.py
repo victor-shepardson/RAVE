@@ -224,6 +224,7 @@ class RAVE(pl.LightningModule):
         self.freeze_encoder = freeze_encoder
 
         self.register_buffer("receptive_field", torch.tensor([0, 0]).long())
+        self.register_buffer("latent_valid_crop", torch.tensor([0, 0]).long())
         self.audio_monitor_epochs = audio_monitor_epochs
 
     def configure_optimizers(self):
@@ -305,17 +306,16 @@ class RAVE(pl.LightningModule):
             * self.sr / self.block_size
             * np.log2(np.e))   
 
-    def run_model(self, x, p=None):
+    def run_model(self, x, p=None, crop_z=False):
         """common logic between training_step and validation_step
         """
         batch_size = x.shape[:-2]
 
         # ENCODE INPUT
-        # get multiband in case
         # x_multiband is always PQMF
-        z, x_multiband = self.encode(x, return_mb=True)
+        z_params, x_multiband = self.encode(x, return_mb=True)
 
-        z, reg = self.encoder.reparametrize(z)[:2]
+        z, reg = self.encoder.reparametrize(z_params)[:2]
         if p is not None: p.tick('encode')
 
         # DECODE LATENT
@@ -337,21 +337,11 @@ class RAVE(pl.LightningModule):
                 y_dec, *self.receptive_field, 
                 dim=x.shape[-1]//y_dec.shape[-1])
             if reg.ndim>2:
-                # TODO: this possibly crops too much?
-                # some of these latents are within receptive field of
-                # the uncropped reconstruction,
-                # meaning the model should learn to make them arbitrarily
-                # precise,
-                # since they are useful for reconstruction but unregularized.
-                # i think this can only happen if the encoder receptive field is 
-                # longer than the generator though?
-                # otherwise the model can't distingish such parts of the posterior, as they would be out of r.f. of the zero padding.
-                # maybe it just distorts the mean KLD?
                 reg = rave.core.valid_signal_crop(
-                    reg,
-                    *self.receptive_field,
-                    dim=self.block_size
-                )
+                    reg, *self.latent_valid_crop, dim=1)
+            if crop_z:
+                z = rave.core.valid_signal_crop(
+                    z, *self.latent_valid_crop, dim=1)
 
         if p is not None: p.tick('crop')
 
@@ -374,7 +364,7 @@ class RAVE(pl.LightningModule):
         # mean over batch, time
         reg = reg.mean()
 
-        return x_raw, y_raw, x_multiband, y_multiband, z, reg
+        return x_raw, y_raw, x_multiband, y_multiband, z_params, z, reg
 
     def training_step(self, batch, batch_idx):
         p = Profiler()
@@ -385,7 +375,7 @@ class RAVE(pl.LightningModule):
         self.encoder.set_warmed_up(self.warmed_up and self.freeze_encoder)
         self.decoder.set_warmed_up(self.warmed_up)
 
-        x_raw, y_raw, x_multiband, y_multiband, z, reg = self.run_model(x, p)
+        x_raw, y_raw, x_multiband, y_multiband, _, _, reg = self.run_model(x, p)
 
         # DISTANCE BETWEEN INPUT AND OUTPUT
         distances = {}
@@ -487,21 +477,17 @@ class RAVE(pl.LightningModule):
         p.tick('logging')
 
     def validation_step(self, x, batch_idx):
-        x_raw, y_raw, x_multiband, y_multiband, z, reg = self.run_model(x)
+        with torch.no_grad():
+            x_raw, y_raw, _, _, z_params, z, reg = self.run_model(x)
 
         if isinstance(self.encoder, blocks.VariationalEncoder):
-            mean = torch.split(z, z.shape[1] // 2, 1)[0]
+            mean, _ = z_params.chunk(2, 1)
         else:
             mean = None
         
         distance = self.audio_distance(x_raw, y_raw)
         full_distance = sum(distance.values())
-
-        if reg.ndim>2:
-            # sum over latent
-            reg = reg.sum(1)
-        # mean over batch, time
-        reg = reg.mean().item()
+        reg = reg.item()
 
         if self.trainer is not None:
             self.log('validation', full_distance)
@@ -520,6 +506,11 @@ class RAVE(pl.LightningModule):
             print(
                 f"Receptive field: {1000*lrf/self.sr:.2f}ms <-- x --> {1000*rrf/self.sr:.2f}ms"
             )
+            lz, rz = rave.core.get_latent_valid_crop(self)
+            self.latent_valid_crop[0] = lz
+            self.latent_valid_crop[1] = rz
+            print(f"Cropped latent frames: {lz} --> z <-- {rz}")
+
 
         if not len(out): return
 

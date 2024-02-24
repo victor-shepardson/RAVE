@@ -217,6 +217,31 @@ def get_rave_receptive_field(model, n_channels=1):
     print(f"Compression ratio: {ratio}x (~{rate:.1f}Hz @ {model.sr}Hz)")
     return left_receptive_field, right_receptive_field
 
+@torch.enable_grad()
+def get_latent_valid_crop(model):
+    if not sum(model.receptive_field):
+        raise ValueError('set receptive_field first')
+    
+    N = 4*max(model.receptive_field//model.block_size * model.block_size)
+    model.eval()
+    device = next(iter(model.parameters())).device
+
+    x = torch.randn(1, model.n_channels, N, requires_grad=True, device=device)
+    # run forward, keep z
+    # this also valid crops y 
+    _,y,_,_,_,z,_ = model.run_model(x)
+    # print(f'{x.shape=}')
+    # print(f'{z.shape=}, {z.requires_grad=}')
+    # print(f'{y.shape=}')
+    # count z positions which don't affect y
+    z.retain_grad()
+    y.sum().backward()
+    assert z.grad is not None, "latent has no grad"
+    left, right = z.grad.sum((0,1)).chunk(2)
+    left_field = len(left[left==0])
+    right_field = len(right[right==0])
+    model.zero_grad()
+    return left_field, right_field
 
 def valid_signal_crop(x, left_rf, right_rf, dim=None):
     if dim is None:

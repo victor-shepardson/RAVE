@@ -6,7 +6,7 @@ import subprocess
 from datetime import timedelta
 from functools import partial
 from itertools import repeat
-from typing import Callable, Iterable, Sequence, Tuple
+from typing import Callable, Iterable, Sequence, Tuple, List
 
 import lmdb
 import numpy as np
@@ -49,40 +49,72 @@ flags.DEFINE_bool('lazy',
 flags.DEFINE_bool('dyndb',
                   default=True,
                   help="Allow the database to grow dynamically")
+flags.DEFINE_bool('join_short_files',
+                  default=False,
+                  help="[vs fork] if files are smaller than num_signal and start+end with silence, use this to join them together before chunking")
 
 
 def float_array_to_int16_bytes(x):
     return np.floor(x * (2**15 - 1)).astype(np.int16).tobytes()
 
+class ConcatStream(object):
+    def __init__(self, streams):
+        self.streams = streams
 
-def load_audio_chunk(path: str, n_signal: int,
-                     sr: int, channels: int = 1) -> Iterable[np.ndarray]:
+    def read(self, n):
+        hd, *tl = self.streams
+        r = hd.read(n)
+        # if chunk is incomplete
+        if len(r) < n:
+            # if there are more streams
+            if len(tl):
+                # continue the chunk from the next stream
+                self.streams = tl
+                r = b''.join((r, self.read(n-len(r))))
+        # return the full size, or final, chunk
+        return r
 
-    _, input_channels = get_audio_channels(path)
+def load_audio_chunk(paths: List[str], n_signal: int,
+                     sr: int, channels: int = 1,
+                     ) -> Iterable[np.ndarray]:
+    n_chan = None
+    for path in paths:
+        # print(path)
+        _, input_channels = get_audio_channels(path)
+        assert n_chan is None or n_chan==input_channels
+        n_chan = input_channels
+
     channel_map = range(channels)
     if input_channels < channels:
         channel_map = (math.ceil(channels / input_channels) * list(range(input_channels)))[:channels]
 
+    streams = []
     processes = []
     for i in range(channels): 
-        process = subprocess.Popen(
-            [
-                'ffmpeg', '-hide_banner', '-loglevel', 'panic', '-i', path, 
-                '-ar', str(sr),
-                '-f', 's16le',
-                '-filter_complex', 'channelmap=%d-0'%channel_map[i],
-                '-'
-            ],
-            stdout=subprocess.PIPE,
-        )
-        processes.append(process)
+        channel_streams = []
+        # loop over files and concatenate stdouts
+        for path in paths:
+            process = subprocess.Popen(
+                [
+                    'ffmpeg', '-hide_banner', '-loglevel', 'panic', '-i', path, 
+                    '-ar', str(sr),
+                    '-f', 's16le',
+                    '-filter_complex', 'channelmap=%d-0'%channel_map[i],
+                    '-'
+                ],
+                stdout=subprocess.PIPE,
+            )
+            channel_streams.append(process.stdout)
+            processes.append(process)
+        streams.append(ConcatStream(channel_streams))
     
-    chunk = [p.stdout.read(n_signal * 4) for p in processes]
+    chunk = [s.read(n_signal * 4) for s in streams]
     while len(chunk[0]) == n_signal * 4:
         yield b''.join(chunk)
-        chunk = [p.stdout.read(n_signal * 4) for p in processes]
-    process.stdout.close()
+        chunk = [s.read(n_signal * 4) for s in streams]
 
+    for process in processes:
+        process.stdout.close()
 
 def get_audio_length(path: str) -> float:
     process = subprocess.Popen(
@@ -101,6 +133,28 @@ def get_audio_length(path: str) -> float:
         _, channels = get_audio_channels(path)
         return path, float(length), int(channels)
     except:
+        return None
+    
+def get_audio_samples(path: str) -> float:
+    process = subprocess.Popen(
+        [
+            'ffprobe', '-i', path, '-v', 'error', '-show_entries',
+            'stream=duration_ts'
+            # 'stream'
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    stdout, _ = process.communicate()
+    # print(stdout.decode())
+    if process.returncode: return None
+    try:
+        # print(stdout.decode())
+        stdout = stdout.decode().split('\n')[1].split('=')[-1]
+        length = int(stdout)
+        return path, length
+    except:
+        raise
         return None
 
 def get_audio_channels(path: str) -> int:
@@ -245,10 +299,37 @@ def main(argv):
     if len(audios) == 0:
         print("No valid file found in %s. Aborting"%FLAGS.input_path)
 
-    if not FLAGS.lazy:
 
+    assert not (FLAGS.join_short_files and FLAGS.lazy)
+    if FLAGS.join_short_files:
+        min_length = FLAGS.num_signal*2 # the miniumum chunk size
+        # recover more data if the mininum file length is multiple chunks:
+        joined_length = min_length * 32
+        # check length of audio files and group them into lists
+        audio_lengths = pool.imap_unordered(get_audio_samples, audios)
+        cur_length, cur_paths = 0, []
+        path_groups = []
+        for path, length in audio_lengths:
+            if cur_length < joined_length:
+                cur_paths.append(path)
+                cur_length += length
+            else:
+                path_groups.append(cur_paths)
+                cur_paths = [path]
+                cur_length = length
+        if cur_length >= min_length:
+            path_groups.append(cur_paths)
+    else:
+        path_groups = [[a] for a in audios]
+
+    total_length = 0
+    for _,length_s,_ in pool.imap_unordered(get_audio_length, audios):
+        total_length += length_s
+    print(f'total audio length: {int(total_length//60)}:{total_length%60}')
+
+    if not FLAGS.lazy:
         # load chunks
-        chunks = flatmap(pool, chunk_load, audios)
+        chunks = flatmap(pool, chunk_load, path_groups)
         chunks = enumerate(chunks)
 
         processed_samples = map(partial(process_audio_array, env=env, channels=FLAGS.channels), chunks)

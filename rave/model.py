@@ -305,48 +305,37 @@ class RAVE(pl.LightningModule):
             * self.sr / self.block_size
             * np.log2(np.e))   
 
-    def training_step(self, batch, batch_idx):
-        p = Profiler()
-        gen_opt, dis_opt = self.optimizers()
-        x_raw = batch
-        x_raw.requires_grad = True
-
-        batch_size = x_raw.shape[:-2]
-        self.encoder.set_warmed_up(self.warmed_up and self.freeze_encoder)
-        self.decoder.set_warmed_up(self.warmed_up)
+    def run_model(self, x, p=None):
+        """common logic between training_step and validation_step
+        """
+        batch_size = x.shape[:-2]
 
         # ENCODE INPUT
         # get multiband in case
-        z, x_multiband = self.encode(x_raw, return_mb=True)
+        # x_multiband is always PQMF
+        z, x_multiband = self.encode(x, return_mb=True)
 
         z, reg = self.encoder.reparametrize(z)[:2]
-        p.tick('encode')
+        if p is not None: p.tick('encode')
 
         # DECODE LATENT
-        y = self.decoder(z)
-        if self.output_mode == "pqmf":
-            y_multiband = y
-            y_raw = _pqmf_decode(self.pqmf, y, batch_size=batch_size, n_channels=self.n_channels)
-        else:
-            y_raw = y 
-            y_multiband = _pqmf_encode(self.pqmf, y)
+        # y_dec may be either PQMF or raw
+        y_dec = self.decoder(z)
 
         # TODO this has been added for training with num_samples = 65536 samples, output padding seems to mess with output dimensions. 
         # this may probably conflict with cached_conv
-        y_raw = y_raw[..., :x_raw.shape[-1]]
-        y_multiband = y_multiband[..., :x_multiband.shape[-1]]
+        # y_raw = y_raw[..., :x_raw.shape[-1]]
+        # y_multiband = y_multiband[..., :x_multiband.shape[-1]]
 
-        p.tick('decode')
+        if p is not None: p.tick('decode')
 
         if self.valid_signal_crop and self.receptive_field.sum():
             x_multiband = rave.core.valid_signal_crop(
-                x_multiband,
-                *self.receptive_field,
-            )
-            y_multiband = rave.core.valid_signal_crop(
-                y_multiband,
-                *self.receptive_field,
-            )
+                x_multiband, *self.receptive_field,
+                dim=x.shape[-1]//x_multiband.shape[-1])
+            y_dec = rave.core.valid_signal_crop(
+                y_dec, *self.receptive_field, 
+                dim=x.shape[-1]//y_dec.shape[-1])
             if reg.ndim>2:
                 # TODO: this possibly crops too much?
                 # some of these latents are within receptive field of
@@ -364,14 +353,39 @@ class RAVE(pl.LightningModule):
                     dim=self.block_size
                 )
 
+        if p is not None: p.tick('crop')
+
+        if self.output_mode == "pqmf":
+            x_raw = _pqmf_decode(
+                self.pqmf, x_multiband, 
+                batch_size=batch_size, n_channels=self.n_channels)
+            y_raw = _pqmf_decode(
+                self.pqmf, y_dec, 
+                batch_size=batch_size, n_channels=self.n_channels)
+            y_multiband = y_dec
+        else:
+            x_raw = x
+            y_raw = y_dec
+            y_multiband = _pqmf_encode(self.pqmf, y_raw)
+
         if reg.ndim>2:
             # sum over latent
             reg = reg.sum(1)
-
         # mean over batch, time
         reg = reg.mean()
 
-        p.tick('crop')
+        return x_raw, y_raw, x_multiband, y_multiband, z, reg
+
+    def training_step(self, batch, batch_idx):
+        p = Profiler()
+        gen_opt, dis_opt = self.optimizers()
+        x = batch
+        # x.requires_grad = True
+
+        self.encoder.set_warmed_up(self.warmed_up and self.freeze_encoder)
+        self.decoder.set_warmed_up(self.warmed_up)
+
+        x_raw, y_raw, x_multiband, y_multiband, z, reg = self.run_model(x, p)
 
         # DISTANCE BETWEEN INPUT AND OUTPUT
         distances = {}
@@ -473,35 +487,16 @@ class RAVE(pl.LightningModule):
         p.tick('logging')
 
     def validation_step(self, x, batch_idx):
+        x_raw, y_raw, x_multiband, y_multiband, z, reg = self.run_model(x)
 
-        z, x_multiband = self.encode(x, return_mb=True)
         if isinstance(self.encoder, blocks.VariationalEncoder):
             mean = torch.split(z, z.shape[1] // 2, 1)[0]
         else:
             mean = None
-
-        z, reg = self.encoder.reparametrize(z)
-
-        y = self.decoder(z)
-
-        if self.valid_signal_crop and self.receptive_field.sum():
-            x_multiband = rave.core.valid_signal_crop(
-                x_multiband, *self.receptive_field)
-            y = rave.core.valid_signal_crop(y, *self.receptive_field)
-
-        if self.output_mode == "pqmf":
-            batch_size = y.shape[:-2]
-            x = _pqmf_decode(
-                self.pqmf, x_multiband, 
-                batch_size=batch_size, n_channels=self.n_channels)            
-            y = _pqmf_decode(
-                self.pqmf, y, 
-                batch_size=batch_size, n_channels=self.n_channels)            
         
-        distance = self.audio_distance(x, y)
+        distance = self.audio_distance(x_raw, y_raw)
         full_distance = sum(distance.values())
 
-        # NOTE: should crop reg as in train_step?
         if reg.ndim>2:
             # sum over latent
             reg = reg.sum(1)
@@ -514,7 +509,7 @@ class RAVE(pl.LightningModule):
                 self.log('valid_kld_bps', self.npz_to_bps(reg))
 
         # put reconstruction first for better logs
-        return torch.cat([y, x], -1), mean
+        return torch.cat([y_raw, x_raw], -1), mean
 
     def validation_epoch_end(self, out):
         if not self.receptive_field.sum():

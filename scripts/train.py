@@ -40,6 +40,10 @@ flags.DEFINE_string('db_path',
                     None,
                     help='Preprocessed dataset path',
                     required=True)
+flags.DEFINE_string('val_db_path',
+                    None,
+                    help='Preprocessed dataset path for validation',
+                    required=False)
 flags.DEFINE_string('out_path',
                     default="runs/",
                     help='Output folder')
@@ -191,8 +195,9 @@ def main(argv):
     if FLAGS.derivative:
         model.integrator = rave.dataset.get_derivator_integrator(model.sr)[1]
 
-    # parse datasset
-    dataset = rave.dataset.get_dataset(FLAGS.db_path,
+    # parse dataset
+    def get_dataset(db_path):
+        return rave.dataset.get_dataset(db_path,
                                        model.sr,
                                        FLAGS.n_signal,
                                        derivative=FLAGS.derivative,
@@ -205,7 +210,11 @@ def main(argv):
                                        distort_p=FLAGS.distort_p,
                                        rand_pitch=FLAGS.rand_pitch,
                                        n_channels=n_channels)
-    train, val = rave.dataset.split_dataset(dataset, 98)
+    train = get_dataset(FLAGS.db_path)
+    if FLAGS.val_db_path is None:
+        train, val = rave.dataset.split_dataset(train, 98)
+    else:
+        val = get_dataset(FLAGS.val_db_path)
 
     # get data-loader
     num_workers = FLAGS.workers

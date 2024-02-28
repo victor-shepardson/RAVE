@@ -1,6 +1,9 @@
 last merged upstream at v2.3.1 (multichannel)
 
 # Changes in this fork:
+* `--val_db_path` option in `rave train` to use a separate preprocessed dataset instead of the 2% training split
+* refactor and fix cropping to valid portion of reconstruction and regularization losses
+* `--join_short_files` option in `rave preprocess` to use shorter training files by concatenating them before preprocessing
 * also log mono mix of audio to tensorboard for multichannel models
 * new `rave adapt` script for fitting linear adapters between different models
 * sign normalization at export (flip polarity of latents to generally correlate with loudness/brightness)

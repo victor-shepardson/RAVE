@@ -333,40 +333,14 @@ def get_dataset(db_path,
     with open(os.path.join(db_path, 'metadata.yaml'), 'r') as metadata:
         metadata = yaml.safe_load(metadata)
 
-    sr_dataset = metadata.get('sr', 44100)
+    sr_dataset = metadata.get('sr', None)
     print(f'{sr=}, {sr_dataset=}')
+    if sr_dataset is None:
+        print(f'sr_dataset is not set by older preprocessing; assuming {sr}')
+        sr_dataset = sr
     lazy = metadata['lazy']
 
     transform_list = [lambda x: x.astype(np.float32)]
-
-    ### vs fork
-    if speed_semitones:
-        transform_list.append(RandomSpeed(speed_semitones))
-
-    ### vs fork
-    if delay_p:
-        transform_list.append(transforms.RandomApply(
-            RandomDelay(), p=delay_p))
-
-    transform_list.append(
-        transforms.RandomCrop(n_signal)
-    )
-
-    ### vs fork
-    if eq_p:
-        transform_list.append(transforms.RandomApply(
-            RandomEQ(sr), p=eq_p))
-
-    ### vs fork
-    if distort_p:
-        transform_list.append(transforms.RandomApply(
-            RandomDistort(sr), p=distort_p))
-
-    transform_list.append(transforms.RandomApply(
-        lambda x: random_phase_mangle(x, 20, 2000, .99, sr_dataset),
-        p=allpass_p))
-
-    transform_list.append(transforms.Dequantize(16))
 
     ### upstream version of random pitch
     if rand_pitch:
@@ -376,7 +350,36 @@ def get_dataset(db_path,
 
     if sr_dataset != sr:
         transform_list.append(transforms.Resample(sr_dataset, sr))
+    
+    ### vs fork
+    if speed_semitones:
+        transform_list.append(RandomSpeed(speed_semitones))
 
+    ### vs fork
+    if delay_p:
+        transform_list.append(transforms.RandomApply(
+            RandomDelay(), p=delay_p))
+
+    ### vs fork
+    if distort_p:
+        transform_list.append(transforms.RandomApply(
+            RandomDistort(sr), p=distort_p))
+
+    ### vs fork
+    if eq_p:
+        transform_list.append(transforms.RandomApply(
+            RandomEQ(sr), p=eq_p))
+
+    transform_list.append(transforms.RandomApply(
+        lambda x: random_phase_mangle(x, 20, 2000, .99, sr_dataset),
+        p=allpass_p))
+
+    transform_list.append(
+        transforms.RandomCrop(n_signal)
+    )    
+        
+    transform_list.append(transforms.Dequantize(16))
+    
     if normalize:
         transform_list.append(normalize_signal)
 

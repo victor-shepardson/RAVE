@@ -364,6 +364,8 @@ class RAVE(pl.LightningModule):
         # mean over batch, time
         reg = reg.mean()
 
+        # print(f'{x.shape=}, {x_raw.shape=}, {y_raw.shape=}, {x_multiband.shape=}, {y_multiband.shape=}')
+
         return x_raw, y_raw, x_multiband, y_multiband, z_params, z, reg
 
     def training_step(self, batch, batch_idx):

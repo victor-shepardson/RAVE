@@ -77,16 +77,16 @@ class ConcatStream(object):
 def load_audio_chunk(paths: List[str], n_signal: int,
                      sr: int, channels: int = 1,
                      ) -> Iterable[np.ndarray]:
-    n_chan = None
-    for path in paths:
-        # print(path)
-        _, input_channels = get_audio_channels(path)
-        assert n_chan is None or n_chan==input_channels
-        n_chan = input_channels
+    # n_chan = None
+    # for path in paths:
+    #     # print(path)
+    #     _, input_channels = get_audio_channels(path)
+    #     assert n_chan is None or n_chan==input_channels
+    #     n_chan = input_channels
 
-    channel_map = range(channels)
-    if input_channels < channels:
-        channel_map = (math.ceil(channels / input_channels) * list(range(input_channels)))[:channels]
+    # channel_map = range(channels)
+    # if input_channels < channels:
+    #     channel_map = (math.ceil(channels / input_channels) * list(range(input_channels)))[:channels]
 
     streams = []
     processes = []
@@ -94,6 +94,13 @@ def load_audio_chunk(paths: List[str], n_signal: int,
         channel_streams = []
         # loop over files and concatenate stdouts
         for path in paths:
+            ###
+            _, input_channels = get_audio_channels(path)
+
+            channel_map = range(channels)
+            if input_channels < channels:
+                channel_map = (math.ceil(channels / input_channels) * list(range(input_channels)))[:channels]
+            ###
             process = subprocess.Popen(
                 [
                     'ffmpeg', '-hide_banner', '-loglevel', 'panic', '-i', path, 
@@ -154,7 +161,8 @@ def get_audio_samples(path: str) -> float:
         length = int(stdout)
         return path, length
     except:
-        raise
+        # raise
+        print(f'failed to get length for {path}')
         return None
 
 def get_audio_channels(path: str) -> int:
@@ -309,7 +317,11 @@ def main(argv):
         audio_lengths = pool.imap_unordered(get_audio_samples, audios)
         cur_length, cur_paths = 0, []
         path_groups = []
-        for path, length in audio_lengths:
+        print(audio_lengths)
+        for item in audio_lengths:
+            if item is None:
+                continue
+            path, length = item
             if cur_length < joined_length:
                 cur_paths.append(path)
                 cur_length += length
@@ -323,7 +335,10 @@ def main(argv):
         path_groups = [[a] for a in audios]
 
     total_length = 0
-    for _,length_s,_ in pool.imap_unordered(get_audio_length, audios):
+    for item in pool.imap_unordered(get_audio_length, audios):
+        if item is None:
+            continue
+        _,length_s,_ = item
         total_length += length_s
     print(f'total audio length: {int(total_length//60)}:{total_length%60}')
 
@@ -334,7 +349,13 @@ def main(argv):
 
         processed_samples = map(partial(process_audio_array, env=env, channels=FLAGS.channels), chunks)
 
-        pbar = tqdm(processed_samples)
+        def filtered_samples():
+            for item in processed_samples:
+                if item is not None:
+                    yield item
+
+        pbar = tqdm(filtered_samples())
+        # pbar = tqdm(processed_samples)
         n_seconds = 0
         for audio_id in pbar:
             n_seconds = (FLAGS.num_signal * 2) / FLAGS.sampling_rate * audio_id

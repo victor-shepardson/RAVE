@@ -22,6 +22,14 @@ from absl import flags
 import rave
 import rave.dataset
 
+"""
+Adapt the latent space of one RAVE model to another.
+
+When given two exported RAVE models (or other nn~ models with encode and decode methods), this script will export a third nn~ model which adapts the output of `from_model.encode` to approximate the output of `to_model.encode` -- that is, it should make `to_model.decode(adapter(from_model.encode(x)))` approximately reproduce x.
+
+This might be useful if you are training multiple RAVE models on the same data and want to standardize the latent space.
+"""
+
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string('from_model',

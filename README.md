@@ -32,7 +32,6 @@ last merged upstream at v2.3.1 (multichannel)
 
 clone the git repo and run `RAVE_VERSION=2.4.0b CACHED_CONV_VERSION=2.6.0b pip install -e RAVE`
 
-
 ## Transfer Learning
 
 See https://huggingface.co/Intelligent-Instruments-Lab/rave-models for pretrained checkpoints.
@@ -46,6 +45,18 @@ rave train --gpu XXX --config XXX/rave-models/checkpoints/organ_archive_b512_r48
 ```
 
 this would do transfer learning from the low latency (512 sample block) organ model. You can also add more configs; in the above example `--config mid_beta` is resetting the regularization strength (the pretrained model used a low beta value). You could also adjust the sample rate or do other non-architectural changes. make sure to add these after the first `--config` with the checkpoint path.
+
+## Adapters
+
+`rave adapt` takes two exported RAVE models and produces a linear adapter which converts the output of one encoder to approximate the output of the other. For example,
+
+```rave adapt --from_model /path/to/model1.ts --to_model /path/to/model2.ts --db_path /path/to/train/data --name adapt_1to2```
+
+Will make it so that `model2.decode(adapt_1to2(model1.encode(x)))` approximately reproduces x. The exported adapter is a `nn~` model with a `forward` method which operates in the latent space of the models you pass in.
+
+## Sign Normalization
+
+If you add the `--normalize_signs` flag when using `rave export`, it will flip the sign of each latent so that it correlates with a measure of loudness and brighteness of the audio. This should make the first latent variable always louder in the positive direction, for example, and the others somewhat more predictable in behavior. 
 
 # --- original README follows below ---
 ![rave_logo](docs/rave.png)

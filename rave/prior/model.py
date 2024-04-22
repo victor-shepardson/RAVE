@@ -27,7 +27,8 @@ class Prior(pl.LightningModule):
         self.sr = sr
 
         if latent_size is not None:
-            self.latent_size = 2**math.ceil(math.log2(latent_size))
+            # self.latent_size = 2**math.ceil(math.log2(latent_size))
+            self.latent_size = latent_size
         elif fidelity is not None:
             assert pretrained_vae, "giving fidelity keyword needs the pretrained_vae keyword to be given"
             latent_size = torch.where(pretrained_vae.fidelity > fidelity)[0][0]

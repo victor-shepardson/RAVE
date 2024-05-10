@@ -17,14 +17,18 @@ import cached_conv as cc
 class Prior(pl.LightningModule):
 
     def __init__(self, resolution, res_size, skp_size, kernel_size, cycle_size,
-                 n_layers, pretrained_vae=None, fidelity=None, n_channels=1, latent_size=None, sr=44100):
+                 n_layers, pretrained_vae=None, fidelity=None, n_channels=1, latent_size=None, 
+                #  sr=44100,
+                 sr=None, # ignored for compatibility -- sr comes from pretrained
+                 ):
         super().__init__()
 
         self.diagonal_shift = DiagonalShift()
         self.quantized_normal = QuantizedNormal(resolution)
 
         self.synth = pretrained_vae
-        self.sr = sr
+        self.sr = self.synth.sr
+        # self.sr = sr
 
         if latent_size is not None:
             # self.latent_size = 2**math.ceil(math.log2(latent_size))

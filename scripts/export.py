@@ -223,8 +223,11 @@ class ScriptedRAVE(nn_tilde.Module):
             # correlate with latents
             # set signs
             w = w - w.mean()
-            self.signs[:] = (w * z).sum(0).sign()
-            logging.info(f'flipped latent dims: {self.signs}')
+            dot = (w * z).sum(0)
+            self.signs[:] = dot.sign()
+            logging.info(f'flipped latent dims:')
+            for i, (s, d) in enumerate(zip(self.signs, dot)):
+                logging.info(f'{i}: sign {s}, dot product {d}')
 
         # init prior in case
         self._has_prior = False

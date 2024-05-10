@@ -1,0 +1,6 @@
+from __gin__ import dynamic_registration
+
+import rave
+
+rave.BetaWarmupCallback:
+    warmup_len = 100000

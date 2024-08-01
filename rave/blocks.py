@@ -93,7 +93,6 @@ class DilatedUnit(nn.Module):
     ) -> None:
         super().__init__()
         groups = max(1, dim//group_size)
-        print(f'DilatedUnit: {dilation=}, {group_size=}, {groups=}')
         net = [
             activation(dim),
             normalization(
@@ -577,7 +576,6 @@ class EncoderV2(nn.Module):
                 out_channels = num_channels * 2
 
             groups = max(1,min(num_channels, out_channels)//8) if group_resample else 1
-            print(f'encoder: {groups=}')
 
             net.append(
                 normalization(
@@ -676,7 +674,6 @@ class GeneratorV2(nn.Module):
             net.append(activation(num_channels))
             
             groups = max(1,min(num_channels, out_channels)//8) if group_resample else 1
-            print(f'generator: {groups=}')
 
             if r > 1:
                 net.append(

@@ -74,6 +74,16 @@ flags.DEFINE_string('prior',
                     default=None,
                     help = "path to prior (optional)")
 
+flags.DEFINE_multi_string('config',
+                          default=None,
+                          help='RAVE configuration to use')
+flags.DEFINE_multi_string('override', default=[], help='Override gin binding')
+
+
+def add_gin_extension(config_name: str) -> str:
+    if config_name[-4:] != '.gin':
+        config_name += '.gin'
+    return config_name
 
 class DumbPrior(nn.Module):
     def forward(self, x: torch.Tensor):
@@ -550,31 +560,45 @@ def main(argv):
 
     logging.info("building rave")
 
-    config_file = rave.core.search_for_config(FLAGS.run)
-    if config_file is None:
-        print('Config file not found in %s'%FLAGS.run)
-    gin.parse_config_file(config_file)
-    FLAGS.run = rave.core.search_for_run(FLAGS.run)
+    if FLAGS.config is not None:
+        logging.info('loading gin configs:')
+        logging.info(FLAGS.config)
+        gin.parse_config_files_and_bindings(
+            map(add_gin_extension, FLAGS.config),
+            FLAGS.override,
+        )
+    else:
+        config_file = rave.core.search_for_config(FLAGS.run)
+        if config_file is None:
+            print('Config file not found in %s'%FLAGS.run)
+        gin.parse_config_file(config_file)
 
-    logging.info(FLAGS.run)
+    print(gin.operative_config_str())
 
     pretrained = rave.RAVE()
-    if FLAGS.run is not None:
-        logging.info('model found : %s'%FLAGS.run)
-        checkpoint = torch.load(FLAGS.run, map_location='cpu')
-        if FLAGS.ema_weights and "EMA" in checkpoint["callbacks"]:
-            pretrained.load_state_dict(
-                checkpoint["callbacks"]["EMA"],
-                strict=False,
-            )
-        else:
-            pretrained.load_state_dict(
-                checkpoint["state_dict"],
-                strict=False,
-            )
+    if FLAGS.run == 'init':
+        logging.info('leaving model randomly initialized')
     else:
-        logging.error("No checkpoint found")
-        exit()
+        FLAGS.run = rave.core.search_for_run(FLAGS.run)
+
+        logging.info(FLAGS.run)
+
+        if FLAGS.run is not None:
+            logging.info('model found : %s'%FLAGS.run)
+            checkpoint = torch.load(FLAGS.run, map_location='cpu')
+            if FLAGS.ema_weights and "EMA" in checkpoint["callbacks"]:
+                pretrained.load_state_dict(
+                    checkpoint["callbacks"]["EMA"],
+                    strict=False,
+                )
+            else:
+                pretrained.load_state_dict(
+                    checkpoint["state_dict"],
+                    strict=False,
+                )
+        else:
+            logging.error("No checkpoint found")
+            exit()
     pretrained.eval()
 
     if isinstance(pretrained.encoder, rave.blocks.VariationalEncoder):

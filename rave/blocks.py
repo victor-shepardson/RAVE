@@ -88,9 +88,12 @@ class DilatedUnit(nn.Module):
         dim: int,
         kernel_size: int,
         dilation: int,
+        group_size: int = 256,#DEBUG 2**16,
         activation: Callable[[int], nn.Module] = lambda dim: nn.LeakyReLU(.2)
     ) -> None:
         super().__init__()
+        groups = max(1, dim//group_size)
+        print(group_size, groups)
         net = [
             activation(dim),
             normalization(
@@ -98,6 +101,7 @@ class DilatedUnit(nn.Module):
                           dim,
                           kernel_size=kernel_size,
                           dilation=dilation,
+                          groups=groups,
                           padding=cc.get_padding(
                               kernel_size,
                               dilation=dilation,
@@ -528,7 +532,8 @@ class EncoderV2(nn.Module):
         n_channels: int = 1,
         activation: Callable[[int], nn.Module] = lambda dim: nn.LeakyReLU(.2),
         adain: Optional[Callable[[int], nn.Module]] = None,
-        spectrogram = None
+        spectrogram = None,
+        group_resample: bool = False
     ) -> None:
         super().__init__()
         dilations_list = normalize_dilations(dilations, ratios)
@@ -568,6 +573,10 @@ class EncoderV2(nn.Module):
                 out_channels = num_channels * r
             else:
                 out_channels = num_channels * 2
+
+            groups = max(1,min(num_channels, out_channels)//8) if group_resample else 1
+            print(f'encoder: {groups=}')
+
             net.append(
                 normalization(
                     cc.Conv1d(
@@ -575,6 +584,7 @@ class EncoderV2(nn.Module):
                         out_channels,
                         kernel_size=2 * r,
                         stride=r,
+                        groups=groups,
                         padding=cc.get_padding(2 * r, r),
                     )))
 
@@ -625,6 +635,7 @@ class GeneratorV2(nn.Module):
         activation: Callable[[int], nn.Module] = lambda dim: nn.LeakyReLU(.2),
         adain: Optional[Callable[[int], nn.Module]] = None,
         causal_convtranspose: bool = False,
+        group_resample: bool = False
     ) -> None:
         super().__init__()
         if data_size is None:
@@ -661,18 +672,22 @@ class GeneratorV2(nn.Module):
                 out_channels = num_channels // 2
             net.append(activation(num_channels))
             
-            
+            groups = max(1,min(num_channels, out_channels)//8) if group_resample else 1
+            print(f'generator: {groups=}')
+
             if r > 1:
                 net.append(
                     normalization(cc.ConvTranspose1d(
                         num_channels, out_channels,
                         2*r, stride=r, padding=r//2,
+                        groups=groups,
                         causal=causal_convtranspose)))
             else:
                 net.append(
                     normalization(cc.Conv1d(
-                        num_channels, out_channels,
-                        3, padding=cc.get_padding(3))))
+                        num_channels, out_channels, 3,
+                        groups=groups,
+                        padding=cc.get_padding(3))))
 
             num_channels = out_channels
 

@@ -37,7 +37,7 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string('run',
                     default=None,
                     help='Path to the run to export',
-                    required=True)
+                    required=False)
 flags.DEFINE_bool('streaming',
                   default=False,
                   help='Enable the model streaming mode')
@@ -156,7 +156,7 @@ class ScriptedRAVE(nn_tilde.Module):
                 f'Encoder type {pretrained.encoder.__class__.__name__} not supported'
             )
         
-        self.register_buffer('signs', torch.ones(self.latent_size))
+        self.register_buffer('signs', torch.ones(self.full_latent_size))
 
         self.fake_adain = rave.blocks.AdaptiveInstanceNormalization(0)
 
@@ -234,7 +234,7 @@ class ScriptedRAVE(nn_tilde.Module):
             # set signs
             w = w - w.mean()
             dot = (w * z).sum(0)
-            self.signs[:] = dot.sign()
+            self.signs[:len(dot)] = dot.sign()
             logging.info(f'flipped latent dims:')
             for i, (s, d) in enumerate(zip(self.signs, dot)):
                 logging.info(f'{i}: sign {s}, dot product {d}')
@@ -408,17 +408,18 @@ class VariationalScriptedRAVE(ScriptedRAVE):
         z, std = self.encoder.params(h)
         z = z - self.latent_mean.unsqueeze(-1)
         z = F.conv1d(z, self.latent_pca.unsqueeze(-1))
-        z = z[:, :self.latent_size]
         z = z * self.signs[:,None]
+        z = z[:, :self.latent_size]
         std = F.conv1d(std*std, self.latent_pca.unsqueeze(-1).pow(2)).sqrt()
         std = std[:, :self.latent_size]
         return self.encoder.rsample(z, std*temp), (z, std)
 
     def pre_process_latent(self, z):
+
         noise = torch.randn(
-            z.shape[0],
-            self.full_latent_size - z.shape[1],
-            z.shape[-1],
+            z.shape[0], 
+            self.full_latent_size - z.shape[1], 
+            z.shape[-1]
         ).type_as(z)
         # above works since latent_pca is orthonormal
         # if the transform wasn't normal, but was still linear, could do this:
@@ -428,8 +429,8 @@ class VariationalScriptedRAVE(ScriptedRAVE):
         #   ).sqrt()[:, self.latent_size:]
         # noise = pca_noise_std * torch.randn_like(pca_noise_std)
 
-        z = z * self.signs[:,None]
         z = torch.cat([z, noise], 1)
+        z = z * self.signs[:,None]
         z = F.conv1d(z, self.latent_pca.T.unsqueeze(-1))
         z = z + self.latent_mean.unsqueeze(-1)
         return z
@@ -576,11 +577,12 @@ def main(argv):
     print(gin.operative_config_str())
 
     pretrained = rave.RAVE()
-    if FLAGS.run == 'init':
+    if FLAGS.run is None:
+        if FLAGS.config is None:
+            raise ValueError('if --run is not given, --config must be given to export a randomly initialized model')
         logging.info('leaving model randomly initialized')
     else:
         FLAGS.run = rave.core.search_for_run(FLAGS.run)
-
         logging.info(FLAGS.run)
 
         if FLAGS.run is not None:
@@ -658,7 +660,8 @@ def main(argv):
     x = scripted_rave.decode(z)
 
     logging.info("save model")
-    output = FLAGS.output or os.path.dirname(FLAGS.run)
+    output = FLAGS.output or (
+        '.' if FLAGS.run is None else os.path.dirname(FLAGS.run))
     model_name = FLAGS.name or FLAGS.run.split(os.sep)[-4]
     if FLAGS.streaming:
         model_name += "_streaming"

@@ -88,12 +88,12 @@ class DilatedUnit(nn.Module):
         dim: int,
         kernel_size: int,
         dilation: int,
-        group_size: int = 256,#DEBUG 2**16,
+        group_size: int = 2**16,
         activation: Callable[[int], nn.Module] = lambda dim: nn.LeakyReLU(.2)
     ) -> None:
         super().__init__()
         groups = max(1, dim//group_size)
-        print(group_size, groups)
+        print(f'DilatedUnit: {dilation=}, {group_size=}, {groups=}')
         net = [
             activation(dim),
             normalization(
@@ -533,6 +533,7 @@ class EncoderV2(nn.Module):
         activation: Callable[[int], nn.Module] = lambda dim: nn.LeakyReLU(.2),
         adain: Optional[Callable[[int], nn.Module]] = None,
         spectrogram = None,
+        group_size: int = 2**16,
         group_resample: bool = False
     ) -> None:
         super().__init__()
@@ -564,6 +565,7 @@ class EncoderV2(nn.Module):
                             dim=num_channels,
                             kernel_size=kernel_size,
                             dilation=d,
+                            group_size=group_size,
                         )))
 
             # ADD DOWNSAMPLING UNIT
@@ -635,6 +637,7 @@ class GeneratorV2(nn.Module):
         activation: Callable[[int], nn.Module] = lambda dim: nn.LeakyReLU(.2),
         adain: Optional[Callable[[int], nn.Module]] = None,
         causal_convtranspose: bool = False,
+        group_size: int = 2**16,
         group_resample: bool = False
     ) -> None:
         super().__init__()
@@ -701,6 +704,7 @@ class GeneratorV2(nn.Module):
                             dim=num_channels,
                             kernel_size=kernel_size,
                             dilation=d,
+                            group_size=group_size
                         )))
 
         net.append(activation(num_channels))

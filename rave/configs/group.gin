@@ -1,0 +1,12 @@
+from __gin__ import dynamic_registration
+
+import rave
+from rave import blocks
+
+blocks.GeneratorV2:
+    group_size = 256
+    group_resample = True
+
+blocks.EncoderV2:
+    group_size = 256
+    group_resample = True

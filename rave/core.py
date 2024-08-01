@@ -264,17 +264,18 @@ def relative_distance(
 def mean_difference(target: torch.Tensor,
                     value: torch.Tensor,
                     norm: str = 'L1',
-                    relative: bool = False):
+                    relative: bool = False,
+                    eps: float = 1e-5):
     diff = target - value
     if norm == 'L1':
         diff = diff.abs().mean()
         if relative:
-            diff = diff / target.abs().mean()
+            diff = diff / (target.abs().mean()+eps)
         return diff
     elif norm == 'L2':
         diff = (diff * diff).mean()
         if relative:
-            diff = diff / (target * target).mean()
+            diff = diff / ((target * target).mean()+eps)
         return diff
     else:
         raise Exception(f'Norm must be either L1 or L2, got {norm}')

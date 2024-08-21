@@ -131,6 +131,7 @@ class ScriptedRAVE(nn_tilde.Module):
         self.register_attribute("learn_source", False)
         self.register_attribute("reset_source", False)
 
+
         self.register_buffer("latent_pca", pretrained.latent_pca)
         self.register_buffer("latent_mean", pretrained.latent_mean)
         self.register_buffer("fidelity", pretrained.fidelity)
@@ -156,6 +157,7 @@ class ScriptedRAVE(nn_tilde.Module):
                 f'Encoder type {pretrained.encoder.__class__.__name__} not supported'
             )
         
+        # self.register_attribute("bias", tuple([0.]*self.latent_size))
         self.register_buffer('signs', torch.ones(self.full_latent_size))
 
         self.fake_adain = rave.blocks.AdaptiveInstanceNormalization(0)
@@ -357,6 +359,16 @@ class ScriptedRAVE(nn_tilde.Module):
     def forward(self, x):
         return self.decode(self.encode(x, temp=1.0), from_forward=True)
 
+    # @torch.jit.export
+    # def get_bias(self) -> tuple[float,...]:
+    #     return self.bias
+
+    # @torch.jit.export
+    # def set_bias(self, bias: tuple[float,...]) -> int:
+    #     self.bias = bias
+    #     print(bias)
+    #     return 0
+    
     @torch.jit.export
     def get_learn_target(self) -> bool:
         return self.learn_target[0]
@@ -573,8 +585,6 @@ def main(argv):
         if config_file is None:
             print('Config file not found in %s'%FLAGS.run)
         gin.parse_config_file(config_file)
-
-    print(gin.operative_config_str())
 
     pretrained = rave.RAVE()
     if FLAGS.run is None:

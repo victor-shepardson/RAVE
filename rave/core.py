@@ -270,6 +270,8 @@ def mean_difference(target: torch.Tensor,
     if norm == 'L1':
         diff = diff.abs().mean()
         if relative:
+        # NOTE: this takes the mean over batch and time dimension before 
+        #    dividing by target
             diff = diff / (target.abs().mean()+eps)
         return diff
     elif norm == 'L2':

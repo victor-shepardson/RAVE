@@ -2,7 +2,7 @@ from __gin__ import dynamic_registration
 
 import rave
 
-PHASE_1_DURATION = 0
+PHASE_1_DURATION = 100
 
 rave.BetaWarmupCallback:
     warmup_len = 20000

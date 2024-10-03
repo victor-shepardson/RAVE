@@ -312,9 +312,14 @@ def main(argv):
         print(f'transferring weights from {transfer_run}')
         sd = torch.load(transfer_run, map_location='cpu')["state_dict"]
         msd = model.state_dict()
+        for k in set(msd) - set(sd):
+            print(f'skipping {k} not in base model')
         for k in list(sd):
-            if k not in model.state_dict() or sd[k].shape != msd[k].shape:
-                print(f'skipping {k}')
+            if k not in msd:
+                print(f'skipping {k} not in new model')
+                sd.pop(k)
+            elif sd[k].shape != msd[k].shape:
+                print(f'skipping {k} shaped {sd[k].shape} in base model, {msd[k].shape} in new')
                 sd.pop(k)
         model.load_state_dict(sd, strict=False)
 

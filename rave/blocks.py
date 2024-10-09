@@ -445,6 +445,9 @@ class Encoder(nn.Module):
         data_size = data_size or n_channels
         net = [cc.Conv1d(data_size * n_channels, capacity, 7, padding=cc.get_padding(7))]
 
+        # store this for computing block_size
+        self.downsample_factor = math.prod(ratios)
+
         for i, r in enumerate(ratios):
             in_dim = 2**i * capacity
             out_dim = 2**(i + 1) * capacity

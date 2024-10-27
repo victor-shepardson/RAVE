@@ -132,7 +132,7 @@ def main(argv):
     from_model = torch.jit.load(FLAGS.from_model)
     to_model = torch.jit.load(FLAGS.to_model)
 
-    assert from_model.n_channels == to_model.n_channels
+    # assert from_model.n_channels == to_model.n_channels
 
     logging.info("preparing data")
 

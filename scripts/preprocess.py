@@ -296,8 +296,12 @@ def main(argv):
         map_async=not FLAGS.dyndb,
         writemap=not FLAGS.dyndb,
     )
+
+    print('database created')
+
     pool = multiprocessing.Pool()
 
+    print('process pool created')
 
     # search for audio files
     audios = search_for_audios(FLAGS.input_path, FLAGS.ext)
@@ -306,6 +310,8 @@ def main(argv):
     audios = [*audios]
     if len(audios) == 0:
         print("No valid file found in %s. Aborting"%FLAGS.input_path)
+    else:
+        print(f'found {len(audios)} audio files')
 
 
     assert not (FLAGS.join_short_files and FLAGS.lazy)

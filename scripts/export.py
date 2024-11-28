@@ -54,7 +54,7 @@ flags.DEFINE_integer(
 flags.DEFINE_bool(
     'normalize_signs',
     default=True,
-    help='Enable fake stereo mode (one encoding, double decoding')
+    help='flip sign of each latent dimension to correlate with louder+brighter sound')
 flags.DEFINE_string('name', 
                      default= None,
                      help = "custom name for the scripted model (default: run name)")
@@ -217,7 +217,7 @@ class ScriptedRAVE(nn_tilde.Module):
             # get random batch of latents
             bs = 8
             if self.n_channels * bs > cc.MAX_BATCH_SIZE:
-                logging.warn('warning: may need to increase cachedconv.MAX_BATCH_SIZE')
+                logging.warning('warning: may need to increase cachedconv.MAX_BATCH_SIZE')
             zs = 32*self.sr//ratio_encode
             z = torch.randn(
                 zs*bs, self.latent_size,
@@ -659,7 +659,7 @@ def main(argv):
     logging.info("script model")
     scripted_rave = script_class(
         pretrained=pretrained,
-        channels = FLAGS.channels,
+        channels=FLAGS.channels,
         fidelity=FLAGS.fidelity,
         latent_size=FLAGS.latent_size,
         target_sr=FLAGS.sr,

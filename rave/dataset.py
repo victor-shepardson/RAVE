@@ -61,7 +61,7 @@ class RandomEQ(transforms.Transform):
         Args:
             sr: audio sample rate
             p_lp: probability of applying lowpass filter
-            p_bp: probability of applying each bandpass filter
+            p_bp: probability of applying each band filter
             n_pp: number of band filters
             p_ls: probability of applying low shelf filter
         """

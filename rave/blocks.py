@@ -639,9 +639,11 @@ class GeneratorV2(nn.Module):
         adain: Optional[Callable[[int], nn.Module]] = None,
         causal_convtranspose: bool = False,
         group_size: int = 2**16,
-        group_resample: bool = False
+        group_resample: bool = False,
+        clip: Optional[str] = 'tanh'
     ) -> None:
         super().__init__()
+        self.clip = clip
         if data_size is None:
             data_size = n_channels
         else:
@@ -745,7 +747,11 @@ class GeneratorV2(nn.Module):
 
         x = x + noise
 
-        return torch.tanh(x)
+        if self.clip is not None: # this guard needed for torchscript
+            if self.clip=='tanh':
+                x = x.tanh()
+
+        return x
 
     def set_warmed_up(self, state: bool):
         pass

@@ -89,6 +89,7 @@ class DilatedUnit(nn.Module):
         kernel_size: int,
         dilation: int,
         group_size: int = 2**16,
+        boom: int = 1,
         activation: Callable[[int], nn.Module] = lambda dim: nn.LeakyReLU(.2)
     ) -> None:
         super().__init__()
@@ -97,7 +98,7 @@ class DilatedUnit(nn.Module):
             activation(dim),
             normalization(
                 cc.Conv1d(dim,
-                          dim,
+                          dim*boom,
                           kernel_size=kernel_size,
                           dilation=dilation,
                           groups=groups,
@@ -105,8 +106,8 @@ class DilatedUnit(nn.Module):
                               kernel_size,
                               dilation=dilation,
                           ))),
-            activation(dim),
-            normalization(cc.Conv1d(dim, dim, kernel_size=1)),
+            activation(dim*boom),
+            normalization(cc.Conv1d(dim*boom, dim, kernel_size=1)),
         ]
 
         self.net = cc.CachedSequential(*net)
@@ -536,7 +537,8 @@ class EncoderV2(nn.Module):
         adain: Optional[Callable[[int], nn.Module]] = None,
         spectrogram = None,
         group_size: int = 2**16,
-        group_resample: bool = False
+        group_resample: bool = False,
+        boom:int = 1
     ) -> None:
         super().__init__()
         dilations_list = normalize_dilations(dilations, ratios)
@@ -568,6 +570,7 @@ class EncoderV2(nn.Module):
                             kernel_size=kernel_size,
                             dilation=d,
                             group_size=group_size,
+                            boom=boom
                         )))
 
             # ADD DOWNSAMPLING UNIT
@@ -640,6 +643,8 @@ class GeneratorV2(nn.Module):
         causal_convtranspose: bool = False,
         group_size: int = 2**16,
         group_resample: bool = False,
+        boom:int = 1,
+        loudness_modulation: bool = False,
         clip: Optional[str] = 'tanh'
     ) -> None:
         super().__init__()
@@ -706,7 +711,8 @@ class GeneratorV2(nn.Module):
                             dim=num_channels,
                             kernel_size=kernel_size,
                             dilation=d,
-                            group_size=group_size
+                            group_size=group_size,
+                            boom=boom
                         )))
 
         net.append(activation(num_channels))
@@ -714,7 +720,10 @@ class GeneratorV2(nn.Module):
         waveform_module = normalization(
             cc.Conv1d(
                 num_channels,
-                data_size * 2 if amplitude_modulation else data_size,
+                # data_size * 2 if amplitude_modulation else data_size,
+                data_size 
+                    + (data_size if amplitude_modulation else 0) 
+                    + (1 if loudness_modulation else 0),
                 kernel_size=kernel_size * 2 + 1,
                 padding=cc.get_padding(kernel_size * 2 + 1),
             ))
@@ -731,6 +740,14 @@ class GeneratorV2(nn.Module):
         self.net = cc.CachedSequential(*net)
 
         self.amplitude_modulation = amplitude_modulation
+        self.loudness_modulation = loudness_modulation
+
+        if self.loudness_modulation:
+            k = 127
+            self.loudness_filter = cc.Conv1d(
+                1, 1, k, bias=False, positive=True, padding=cc.get_padding(k))
+        else:
+            self.loudness_filter = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.net(x)
@@ -741,9 +758,20 @@ class GeneratorV2(nn.Module):
             noise = self.noise_module(x)
             x = self.waveform_module(x)
 
+        if self.loudness_modulation:
+            x, loudness = x.split([x.shape[1]-1,1],1)
+        else:
+            loudness = None
+
         if self.amplitude_modulation:
             x, amplitude = x.split(x.shape[1] // 2, 1)
             x = x * torch.sigmoid(amplitude)
+
+        if loudness is not None and self.loudness_filter is not None:
+            loudness = loudness.sigmoid()
+            # learnable lowpass filter
+            loudness = self.loudness_filter(loudness)
+            x = x * loudness
 
         x = x + noise
 
@@ -757,13 +785,94 @@ class GeneratorV2(nn.Module):
         pass
 
 
-class VariationalEncoder(nn.Module):
 
-    def __init__(self, encoder, beta: float = 1.0, n_channels=1):
+def normal_log_dens(x, mu, sigma):
+    # - log(2pi)/2 - log(sigma) - (x-mu)**2 / 2sigma**2
+    return - math.log(2*math.pi)/2 - sigma.log() - ((x-mu)/sigma)**2/2
+
+def normal_log_dens2(x, mu, logsigma):
+    # - log(2pi)/2 - log(sigma) - (x-mu)**2 / 2sigma**2
+    return - math.log(2*math.pi)/2 - logsigma - ((x-mu)/logsigma.exp())**2/2
+
+def log_sigmoid(x):
+    return -(-x).exp().log1p()
+
+class PriorV1(nn.Module):
+    """mixture of brownian motion with fixed normal,
+    learnable params
+    """
+    def __init__(self, latent_size):
+        super().__init__()
+        # unnormalized weight of brownian component
+        self.pi = nn.Parameter(torch.tensor(0.0)) 
+        # stddev of brownian component per latent
+        self.log_std = nn.Parameter(torch.zeros(latent_size)) 
+
+    def params(self, z):
+        """causal map from latents z to next prior params"""
+        # previous value
+        return torch.cat((torch.zeros_like(z[...,:1]), z[...,:-1]),-1)
+
+    def log_density(self, params, z):
+        # log ( self.pi * N(0,1) + (1-self.pi) * N(z, std))
+        # logsumexp ( logpi + logN(0,1), log(1-pi) + logN(z, std))
+
+        mu = torch.stack((
+            torch.zeros_like(z), 
+            params
+            ))
+        logsigma = torch.stack((
+            torch.zeros_like(self.log_std), 
+            self.log_std
+            ))[:,None,:,None]
+        logpi = log_sigmoid(torch.stack((
+            -self.pi, 
+            self.pi
+            )))[...,None,None,None]
+        
+        return (logpi + normal_log_dens2(z, mu, logsigma)).logsumexp(0)
+
+    def sample(self, params):
+        raise NotImplementedError
+    
+class PriorV0(nn.Module):
+    """mixture of brownian motion with fixed normal"""
+    def __init__(self):
+        super().__init__()
+        self.pi = 0.5 # weight of brownian component
+        self.std = 0.5 # stddev of brownian component
+
+    def params(self, z):
+        """causal map from latents z to next prior params"""
+        # previous value
+        return torch.cat((torch.zeros_like(z[...,:1]), z[...,:-1]),-1)
+
+    def log_density(self, params, z):
+        # log ( self.pi * N(0,1) + (1-self.pi) * N(z, std))
+        # logsumexp ( logpi + logN(0,1), log(1-pi) + logN(z, std))
+
+        mu = torch.stack((
+            torch.zeros_like(z), 
+            params))
+        sigma = torch.stack((
+            torch.ones_like(z),
+            torch.full_like(z, self.std)))
+        logpi = torch.stack((
+            torch.full_like(z, math.log(1-self.pi)),
+            torch.full_like(z, math.log(self.pi))))
+
+        return (logpi + normal_log_dens(z, mu, sigma)).logsumexp(0)
+
+    def sample(self, params):
+        raise NotImplementedError
+
+class VariationalEncoder(nn.Module):
+    def __init__(self, encoder, beta:float=1.0, n_channels=1, prior:nn.Module|None=None):
         super().__init__()
         self.encoder = encoder(n_channels=n_channels)
         self.beta = beta
         self.register_buffer("warmed_up", torch.tensor(0))
+        self.prior = None if prior is None else prior()
 
     def params(self, z):
         mean, scale = z.chunk(2, 1)
@@ -772,7 +881,7 @@ class VariationalEncoder(nn.Module):
     
     def rsample(self, mean, std):
         return torch.randn_like(mean) * std + mean
-
+    
     def reparametrize(self, h):
         """
         Args:
@@ -780,6 +889,31 @@ class VariationalEncoder(nn.Module):
         Returns:
             z: latent samples [batch, latent, time]
             kl: kl-divergence [batch, latent, time]
+        """
+        if self.prior is None:
+            return self.normal_reparametrize(h)
+        else:
+            return self.sampled_reparametrize(h)
+        
+    def sampled_reparametrize(self, h):
+        """
+        sampled KLD: expectation under Q of logQ - logP
+        """
+        mean, std = self.params(h)
+        z = self.rsample(mean, std)
+
+        prior_params = self.prior.params(z)
+
+        # log Q - log P
+        kl = (
+            normal_log_dens(z, mean, std)
+            - self.prior.log_density(prior_params, z))
+
+        return z, self.beta * kl
+
+    def normal_reparametrize(self, h):
+        """
+        original analytic KLD for simple prior case 
         """
         mean, std = self.params(h)
         z = self.rsample(mean, std)

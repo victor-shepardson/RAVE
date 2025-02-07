@@ -168,6 +168,7 @@ class ScriptedRAVE(nn_tilde.Module):
         x_len = 2**14
         x = torch.zeros(1, self.n_channels, x_len)
         z = self.encode(x)
+        # y = self.decode(x)
         ratio_encode = x_len // z.shape[-1]
 
         # configure encoder
@@ -628,7 +629,7 @@ def main(argv):
     logging.info("warmup pass")
 
     x = torch.zeros(1, pretrained.n_channels, 2**14)
-    # pretrained(x)
+    pretrained(x)
 
     logging.info("optimize model")
 

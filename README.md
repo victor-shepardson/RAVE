@@ -1,6 +1,7 @@
 last merged upstream at v2.3.1 (multichannel)
 
 # Changes in this fork:
+* option to use the training dequantization in exported model (on by default, toggleable as an attribute). quiets the model when it sees hard zeros as input
 * `--val_db_path` option in `rave train` to use a separate preprocessed dataset instead of the 2% training split
 * refactor and fix cropping to valid portion of reconstruction and regularization losses
 * `--join_short_files` option in `rave preprocess` to use shorter training files by concatenating them before preprocessing

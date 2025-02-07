@@ -379,6 +379,15 @@ class ScriptedRAVE(nn_tilde.Module):
     #     return 0
     
     @torch.jit.export
+    def get_noise_floor(self) -> bool:
+        return self.noise_floor[0]
+
+    @torch.jit.export
+    def set_noise_floor(self, noise_floor: bool) -> int:
+        self.noise_floor = (noise_floor, )
+        return 0
+    
+    @torch.jit.export
     def get_learn_target(self) -> bool:
         return self.learn_target[0]
 

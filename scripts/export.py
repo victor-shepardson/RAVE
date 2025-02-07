@@ -55,6 +55,10 @@ flags.DEFINE_bool(
     'normalize_signs',
     default=True,
     help='flip sign of each latent dimension to correlate with louder+brighter sound')
+flags.DEFINE_bool(
+    'noise_floor',
+    default=True,
+    help='add white noise before encoding (matches training conditions)')
 flags.DEFINE_string('name', 
                      default= None,
                      help = "custom name for the scripted model (default: run name)")
@@ -97,6 +101,7 @@ class ScriptedRAVE(nn_tilde.Module):
                  fidelity: float = .95,
                  latent_size: int = None,
                  normalize_signs: bool = False,
+                 noise_floor: bool = True,
                  target_sr: bool = None, 
                  prior: prior.Prior = None) -> None:
 
@@ -131,6 +136,7 @@ class ScriptedRAVE(nn_tilde.Module):
         self.register_attribute("learn_source", False)
         self.register_attribute("reset_source", False)
 
+        self.register_attribute("noise_floor", noise_floor)
 
         self.register_buffer("latent_pca", pretrained.latent_pca)
         self.register_buffer("latent_mean", pretrained.latent_mean)
@@ -300,6 +306,9 @@ class ScriptedRAVE(nn_tilde.Module):
                 x = x[:, 0].unsqueeze(0)
             elif self.n_channels > 2:
                 raise RuntimeError("stereo mode is not available when n_channels > 2")
+    
+        if self.noise_floor[0]:
+            x = x + torch.rand_like(x)*(2**-16)
 
         if self.is_using_adain:
             self.update_adain()

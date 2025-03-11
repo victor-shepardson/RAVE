@@ -336,13 +336,23 @@ class Generator(nn.Module):
         use_noise,
         n_channels: int = 1,
         recurrent_layer: Optional[Callable[[], nn.Module]] = None,
+        keep_compute: bool = False,
     ):
         super().__init__()
+
+        def get_size(i):
+            if keep_compute:
+                s = math.prod(ratios[:i])**0.5
+                return int(round(s*2.4*capacity/8)*8)
+            else:
+                return 2**i * capacity
+
         net = [
             normalization(
                 cc.Conv1d(
                     latent_size,
-                    2**len(ratios) * capacity,
+                    get_size(len(ratios)),
+                    # 2**len(ratios) * capacity,
                     7,
                     padding=cc.get_padding(7),
                 ))
@@ -351,14 +361,19 @@ class Generator(nn.Module):
         if recurrent_layer is not None:
             net.append(
                 recurrent_layer(
-                    dim=2**len(ratios) * capacity,
+                    dim=get_size(len(ratios)),
+                    # dim=2**len(ratios) * capacity,
                     cumulative_delay=net[0].cumulative_delay,
                 ))
 
         for i, r in enumerate(ratios):
-            in_dim = 2**(len(ratios) - i) * capacity
-            out_dim = 2**(len(ratios) - i - 1) * capacity
+            in_dim = get_size(len(ratios) - i)
+            out_dim = get_size(len(ratios) - i - 1)
+            # in_dim = 2**(len(ratios) - i) * capacity
+            # out_dim = 2**(len(ratios) - i - 1) * capacity
 
+            # NOTE: this layer is redundant when keep_compute and r=1?
+            # (nearly -- it does increase receptive field slightly)
             net.append(
                 UpsampleLayer(
                     in_dim,
@@ -439,19 +454,28 @@ class Encoder(nn.Module):
         repeat_layers,
         n_channels: int = 1,
         recurrent_layer: Optional[Callable[[], nn.Module]] = None,
+        keep_compute:bool = False,
         # retro-compatiblity
         spectrogram = None
     ):
         super().__init__()
         data_size = data_size or n_channels
-        net = [cc.Conv1d(data_size * n_channels, capacity, 7, padding=cc.get_padding(7))]
+
+        def get_size(i):
+            if keep_compute:
+                s = math.prod(ratios[:i])**0.5
+                return int(round(s*2.4*capacity/8)*8)
+            else:
+                return 2**i * capacity
+
+        net = [cc.Conv1d(data_size * n_channels, get_size(0), 7, padding=cc.get_padding(7))]
 
         # store this for computing block_size
         self.downsample_factor = math.prod(ratios)
 
         for i, r in enumerate(ratios):
-            in_dim = 2**i * capacity
-            out_dim = 2**(i + 1) * capacity
+            in_dim = get_size(i)
+            out_dim = get_size(i+1)
 
             if sample_norm:
                 net.append(SampleNorm())

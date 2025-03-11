@@ -15,3 +15,6 @@ discriminator.CombineDiscriminators:
         @discriminator.MultiScaleDiscriminator,
         @discriminator.MultiScaleSpectralDiscriminator
     ]
+
+rave.RAVE:
+    discriminator = @discriminator.CombineDiscriminators

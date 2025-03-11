@@ -53,13 +53,18 @@ def rectified_2d_conv_block(
 
 class EncodecConvNet(nn.Module):
 
-    def __init__(self, capacity: int, n_channels: int = 1) -> None:
+    def __init__(self, capacity: int, n_channels: int = 1, lite: bool = False) -> None:
         super().__init__()
+        s = 2 if lite else 1
         self.net = nn.Sequential(
-            rectified_2d_conv_block(capacity, (9, 3), in_size=2*n_channels),
-            rectified_2d_conv_block(capacity, (9, 3), (2, 1), (1, 1)),
-            rectified_2d_conv_block(capacity, (9, 3), (2, 1), (1, 2)),
-            rectified_2d_conv_block(capacity, (9, 3), (2, 1), (1, 4)),
+            rectified_2d_conv_block(capacity//s**3, (9, 3), 
+                                    in_size=2*n_channels),
+            rectified_2d_conv_block(capacity//s**2, (9, 3), (2, 1), (1, 1),
+                                    in_size=capacity//s**3,),
+            rectified_2d_conv_block(capacity//s, (9, 3), (2, 1), (1, 2),
+                                    in_size=capacity//s**2),
+            rectified_2d_conv_block(capacity, (9, 3), (2, 1), (1, 4),
+                                    in_size=capacity//s,),
             rectified_2d_conv_block(capacity, (3, 3)),
             rectified_2d_conv_block(capacity, (3, 3),
                                     out_size=1,

@@ -3,4 +3,5 @@ from __gin__ import dynamic_registration
 import rave
 
 rave.BetaWarmupCallback:
+    initial_value = 1e-6
     warmup_len = 200000

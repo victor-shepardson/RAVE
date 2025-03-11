@@ -632,6 +632,8 @@ def main(argv):
             exit()
     pretrained.eval()
 
+    # print(pretrained)
+
     if isinstance(pretrained.encoder, rave.blocks.VariationalEncoder):
         script_class = VariationalScriptedRAVE
     elif isinstance(pretrained.encoder, rave.blocks.DiscreteEncoder):

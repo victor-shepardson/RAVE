@@ -80,7 +80,7 @@ class ResidualLayer(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-
+@gin.configurable
 class DilatedUnit(nn.Module):
 
     def __init__(
@@ -343,6 +343,8 @@ class Generator(nn.Module):
         def get_size(i):
             if keep_compute:
                 s = math.prod(ratios[:i])**0.5
+                # capacity is set so a BRAVE model with RATIOS=[2,2,2,1] 
+                # will be similar in size
                 return int(round(s*2.4*capacity/8)*8)
             else:
                 return 2**i * capacity
@@ -464,6 +466,8 @@ class Encoder(nn.Module):
         def get_size(i):
             if keep_compute:
                 s = math.prod(ratios[:i])**0.5
+                # capacity is set so a BRAVE model with RATIOS=[2,2,2,1] 
+                # will be similar in size
                 return int(round(s*2.4*capacity/8)*8)
             else:
                 return 2**i * capacity
@@ -555,6 +559,7 @@ class EncoderV2(nn.Module):
         kernel_size: int,
         dilations: Sequence[int],
         keep_dim: bool = False,
+        keep_compute: bool = False,
         recurrent_layer: Optional[Callable[[], nn.Module]] = None,
         n_channels: int = 1,
         activation: Callable[[int], nn.Module] = lambda dim: nn.LeakyReLU(.2),
@@ -562,7 +567,7 @@ class EncoderV2(nn.Module):
         spectrogram = None,
         group_size: int = 2**16,
         group_resample: bool = False,
-        boom:int = 1
+        boom:int = 1,
     ) -> None:
         super().__init__()
         dilations_list = normalize_dilations(dilations, ratios)
@@ -571,18 +576,31 @@ class EncoderV2(nn.Module):
         # store this for computing block_size
         self.downsample_factor = math.prod(ratios)
 
+        def get_size(i):
+            if keep_compute:
+                s = math.prod(ratios[:i])**0.5
+                # capacity is set so a RAVE model with RATIOS=[4,4,4,2] 
+                # will be slightly smaller
+                return int(round(s*capacity/8)*8)
+            elif keep_dim:
+                return math.prod(ratios[:i]) * capacity
+            else:
+                return 2**i * capacity
+
         net = [
             normalization(
                 cc.Conv1d(
                     data_size * n_channels,
-                    capacity,
+                    get_size(0),
                     kernel_size=kernel_size * 2 + 1,
                     padding=cc.get_padding(kernel_size * 2 + 1),
                 )),
         ]
 
-        num_channels = capacity
-        for r, dilations in zip(ratios, dilations_list):
+        # num_channels = capacity
+        for i,(r, dilations) in enumerate(zip(ratios, dilations_list)):
+            num_channels = get_size(i)
+            out_channels = get_size(i+1)
             # ADD RESIDUAL DILATED UNITS
             for d in dilations:
                 if adain is not None:
@@ -600,12 +618,18 @@ class EncoderV2(nn.Module):
             # ADD DOWNSAMPLING UNIT
             net.append(activation(num_channels))
 
-            if keep_dim:
-                out_channels = num_channels * r
-            else:
-                out_channels = num_channels * 2
+            # if keep_dim:
+            #     out_channels = num_channels * r
+            # else:
+            #     out_channels = num_channels * 2
 
-            groups = max(1,min(num_channels, out_channels)//8) if group_resample else 1
+            if group_resample:
+                if keep_compute:
+                    groups = max(1,out_channels//8) 
+                else:
+                    groups = max(1,min(num_channels, out_channels)//8)
+            else:
+                groups = 1 
 
             net.append(
                 normalization(
@@ -618,13 +642,13 @@ class EncoderV2(nn.Module):
                         padding=cc.get_padding(2 * r, r),
                     )))
 
-            num_channels = out_channels
+            # num_channels = out_channels
 
-        net.append(activation(num_channels))
+        net.append(activation(out_channels))
         net.append(
             normalization(
                 cc.Conv1d(
-                    num_channels,
+                    out_channels,
                     latent_size * n_out,
                     kernel_size=kernel_size,
                     padding=cc.get_padding(kernel_size),
@@ -657,6 +681,7 @@ class GeneratorV2(nn.Module):
         kernel_size: int,
         dilations: Sequence[int],
         keep_dim: bool = False,
+        keep_compute: bool = False,
         data_size: Union[int, None] = None,
         recurrent_layer: Optional[Callable[[], nn.Module]] = None,
         n_channels: int = 1,
@@ -678,12 +703,23 @@ class GeneratorV2(nn.Module):
         else:
             data_size = data_size * n_channels 
         dilations_list = normalize_dilations(dilations, ratios)[::-1]
-        ratios = ratios[::-1]
+        # ratios = ratios[::-1]
 
-        if keep_dim:
-            num_channels = np.prod(ratios) * capacity
-        else:
-            num_channels = 2**len(ratios) * capacity
+        def get_size(i):
+            if keep_compute:
+                s = math.prod(ratios[:i])**0.5
+                # capacity is set so a RAVE model with RATIOS=[4,4,4,2] 
+                # will be slightly smaller
+                return int(round(s*capacity/8)*8)
+            elif keep_dim:
+                return math.prod(ratios[:i]) * capacity
+            else:
+                return 2**i * capacity
+
+        # if keep_dim:
+        #     num_channels = np.prod(ratios) * capacity
+        # else:
+        #     num_channels = 2**len(ratios) * capacity
 
         net = []
 
@@ -694,20 +730,22 @@ class GeneratorV2(nn.Module):
             normalization(
                 cc.Conv1d(
                     latent_size,
-                    num_channels,
+                    get_size(len(ratios)),
                     kernel_size=kernel_size,
                     padding=cc.get_padding(kernel_size),
                 )), )
 
-        for r, dilations in zip(ratios, dilations_list):
+        for i,(r, dilations) in enumerate(zip(ratios[::-1], dilations_list)):
+            num_channels = get_size(len(ratios)-i)
+            out_channels = get_size(len(ratios)-i-1)
             # ADD UPSAMPLING UNIT
-            if keep_dim:
-                out_channels = num_channels // r
-            else:
-                out_channels = num_channels // 2
+            # if keep_dim:
+            #     out_channels = num_channels // r
+            # else:
+            #     out_channels = num_channels // 2
             net.append(activation(num_channels))
             
-            groups = max(1,min(num_channels, out_channels)//8) if group_resample else 1
+            groups = max(1,out_channels//8) if group_resample else 1
 
             if r > 1:
                 net.append(
@@ -723,27 +761,27 @@ class GeneratorV2(nn.Module):
                         groups=groups,
                         padding=cc.get_padding(3))))
 
-            num_channels = out_channels
+            # num_channels = out_channels
 
             # ADD RESIDUAL DILATED UNITS
             for d in dilations:
                 if adain is not None:
-                    net.append(adain(num_channels))
+                    net.append(adain(out_channels))
                 net.append(
                     Residual(
                         DilatedUnit(
-                            dim=num_channels,
+                            dim=out_channels,
                             kernel_size=kernel_size,
                             dilation=d,
                             group_size=group_size,
                             boom=boom
                         )))
 
-        net.append(activation(num_channels))
+        net.append(activation(out_channels))
 
         waveform_module = normalization(
             cc.Conv1d(
-                num_channels,
+                out_channels,
                 # data_size * 2 if amplitude_modulation else data_size,
                 data_size 
                     + (data_size if amplitude_modulation else 0) 
@@ -1063,12 +1101,12 @@ class SphericalEncoder(nn.Module):
         z = self.encoder(x)
         return z
 
-
+@gin.configurable
 class Snake(nn.Module):
 
-    def __init__(self, dim: int) -> None:
+    def __init__(self, dim: int, init:float=1) -> None:
         super().__init__()
-        self.alpha = nn.Parameter(torch.ones(dim, 1))
+        self.alpha = nn.Parameter(torch.ones(dim, 1).mul_(init))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x + (self.alpha + 1e-9).reciprocal() * (self.alpha *

@@ -54,7 +54,7 @@ class RandomGain(transforms.Transform):
         return x*gain
     
 class RandomEQ(transforms.Transform):
-    def __init__(self, sr, p_lp=0.75, p_bp=0.5, n_bp=2, p_ls=0.5):
+    def __init__(self, sr, p_lp=0.5, p_bp=0.3, n_bp=2, p_ls=0.2):
         """
         Random parametric EQ roughly simulating electric guitar 
         body+pickup resonances and tone control.

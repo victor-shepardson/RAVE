@@ -7,9 +7,6 @@ ACTIVATION = @blocks.Snake
 blocks.ResidualLayer:
     activation = %ACTIVATION
 
-blocks.DilatedUnit:
-    activation = %ACTIVATION
-
 blocks.UpsampleLayer:
     activation = %ACTIVATION
 

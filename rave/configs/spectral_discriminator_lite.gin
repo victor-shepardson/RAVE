@@ -1,0 +1,24 @@
+from __gin__ import dynamic_registration
+
+import rave
+from rave import discriminator
+
+discriminator.MultiScaleSpectralDiscriminator:
+    scales = [4096, 1024, 256]
+    convnet = @discriminator.EncodecConvNet
+
+discriminator.EncodecConvNet:
+    capacity = 32
+    lite = True
+
+discriminator.ConvNet:
+    capacity = 64
+
+discriminator.CombineDiscriminators:
+    discriminators = [
+        @discriminator.MultiScaleDiscriminator,
+        @discriminator.MultiScaleSpectralDiscriminator
+    ]
+
+rave.RAVE:
+    discriminator = @discriminator.CombineDiscriminators

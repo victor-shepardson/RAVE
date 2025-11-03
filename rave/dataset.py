@@ -46,7 +46,7 @@ class RandomGain(transforms.Transform):
         self.db = db
     def __call__(self, x: np.ndarray):
         peak = np.max(np.abs(x))
-        max_db = min(self.db, np.log10(1/(peak+1e-5))*20)
+        max_db = min(self.db, np.log10(1/(peak+1e-2))*20)
         # in case where peak is > 1, max_db is negative,
         # min_db must be <= max_db
         min_db = min(-self.db, max_db)

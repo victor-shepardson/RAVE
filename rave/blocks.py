@@ -340,20 +340,23 @@ class Generator(nn.Module):
     ):
         super().__init__()
 
+        # note that v1 Generator doesn't reverse the order of ratios
         def get_size(i):
             if keep_compute:
-                s = math.prod(ratios[:i])**0.5
+                s = math.prod(ratios[i:])**0.5
                 # capacity is set so a BRAVE model with RATIOS=[2,2,2,1] 
-                # will be similar in size
+                # will be similar in size                
                 return int(round(s*2.4*capacity/8)*8)
             else:
                 return 2**i * capacity
+
 
         net = [
             normalization(
                 cc.Conv1d(
                     latent_size,
-                    get_size(len(ratios)),
+                    get_size(0),
+                    # get_size(len(ratios)),
                     # 2**len(ratios) * capacity,
                     7,
                     padding=cc.get_padding(7),
@@ -363,14 +366,16 @@ class Generator(nn.Module):
         if recurrent_layer is not None:
             net.append(
                 recurrent_layer(
-                    dim=get_size(len(ratios)),
+                    dim=get_size(0),
                     # dim=2**len(ratios) * capacity,
                     cumulative_delay=net[0].cumulative_delay,
                 ))
 
         for i, r in enumerate(ratios):
-            in_dim = get_size(len(ratios) - i)
-            out_dim = get_size(len(ratios) - i - 1)
+            in_dim = get_size(i)
+            out_dim = get_size(i+1)
+            # in_dim = get_size(len(ratios) - i)
+            # out_dim = get_size(len(ratios) - i - 1)
             # in_dim = 2**(len(ratios) - i) * capacity
             # out_dim = 2**(len(ratios) - i - 1) * capacity
 
@@ -703,11 +708,11 @@ class GeneratorV2(nn.Module):
         else:
             data_size = data_size * n_channels 
         dilations_list = normalize_dilations(dilations, ratios)[::-1]
-        # ratios = ratios[::-1]
+        ratios = ratios[::-1]
 
         def get_size(i):
             if keep_compute:
-                s = math.prod(ratios[:i])**0.5
+                s = math.prod(ratios[i:])**0.5
                 # capacity is set so a RAVE model with RATIOS=[4,4,4,2] 
                 # will be slightly smaller
                 return int(round(s*capacity/8)*8)
@@ -730,14 +735,14 @@ class GeneratorV2(nn.Module):
             normalization(
                 cc.Conv1d(
                     latent_size,
-                    get_size(len(ratios)),
+                    get_size(0),
                     kernel_size=kernel_size,
                     padding=cc.get_padding(kernel_size),
                 )), )
 
-        for i,(r, dilations) in enumerate(zip(ratios[::-1], dilations_list)):
-            num_channels = get_size(len(ratios)-i)
-            out_channels = get_size(len(ratios)-i-1)
+        for i,(r, dilations) in enumerate(zip(ratios, dilations_list)):
+            num_channels = get_size(i)
+            out_channels = get_size(i+1)
             # ADD UPSAMPLING UNIT
             # if keep_dim:
             #     out_channels = num_channels // r
@@ -1109,9 +1114,10 @@ class Snake(nn.Module):
         self.alpha = nn.Parameter(torch.ones(dim, 1).mul_(init))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + (self.alpha + 1e-9).reciprocal() * (self.alpha *
-                                                       x).sin().pow(2)
-
+        # the 1e-9 doesn't stabilize this -- alpha can be negative
+        # return x + (self.alpha + 1e-9).reciprocal() * (self.alpha *
+                                                    #    x).sin().pow(2)
+        return x + self.alpha*(x*(self.alpha*x/torch.pi).sinc()).pow(2)
 
 class AdaptiveInstanceNormalization(nn.Module):
 
